@@ -1,0 +1,84 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
+
+:root {
+  color-scheme: light;
+  /* fluid base font-size — 1280px까지 16px, 그 이상에서 점진 확대 */
+  font-size: clamp(15px, calc(14px + 0.12vw), 17.5px);
+}
+
+html, body, #__nuxt {
+  height: 100%;
+}
+
+body {
+  @apply bg-slate-50 text-slate-800 antialiased;
+  font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, system-ui, 'Apple SD Gothic Neo', 'Noto Sans KR', 'Malgun Gothic', sans-serif;
+}
+
+/* ─────────────────────────────────────────────────────────────
+ * 본문 페이지용 컨테이너
+ * 모든 페이지에서 동일한 가로 패딩/최대폭을 갖도록 한다.
+ * - 모바일~태블릿: 좌우 16~24px 패딩
+ * - 데스크톱: 32px 패딩 + max-w 점진 확장
+ * - 4K/울트라와이드: 양옆 6vw 정도만 비우고 본문은 풍부하게
+ * ───────────────────────────────────────────────────────────── */
+.page-shell {
+  width: 100%;
+  margin-inline: auto;
+  padding-inline: clamp(1rem, 1.2vw + 0.75rem, 2.25rem);
+  padding-top: clamp(1rem, 0.6rem + 0.6vw, 1.75rem);
+  padding-bottom: clamp(1.25rem, 0.8rem + 0.8vw, 2rem);
+  max-width: 1280px;
+}
+@media (min-width: 1280px) { .page-shell { max-width: 1360px; } }
+@media (min-width: 1536px) { .page-shell { max-width: 1500px; } }
+@media (min-width: 1792px) { .page-shell { max-width: 1700px; } }
+@media (min-width: 2240px) { .page-shell { max-width: 2000px; } }
+@media (min-width: 2880px) { .page-shell { max-width: 2400px; } }
+
+/* 좁게 유지하고 싶은 페이지(설정 등) */
+.page-shell-narrow {
+  width: 100%;
+  margin-inline: auto;
+  padding-inline: clamp(1rem, 1.2vw + 0.75rem, 2.25rem);
+  padding-top: clamp(1rem, 0.6rem + 0.6vw, 1.75rem);
+  padding-bottom: clamp(1.25rem, 0.8rem + 0.8vw, 2rem);
+  max-width: 64rem;
+}
+@media (min-width: 1536px) { .page-shell-narrow { max-width: 72rem; } }
+
+/* 카드 — 화면 폭에 따라 padding이 살짝 변한다 */
+.card {
+  @apply bg-white rounded-2xl shadow-sm ring-1 ring-slate-200;
+  padding: clamp(0.875rem, 0.5rem + 0.7vw, 1.5rem);
+}
+
+/* 섹션 간 간격 — 화면 폭 따라 살짝 변동 */
+.section-gap > * + * {
+  margin-top: clamp(0.875rem, 0.5rem + 0.7vw, 1.5rem);
+}
+
+.kpi-label {
+  @apply text-xs font-medium text-slate-500 uppercase tracking-wide;
+}
+
+.kpi-value {
+  font-size: clamp(1.25rem, 1rem + 0.6vw, 1.75rem);
+  line-height: 1.15;
+  @apply font-bold text-slate-900 tabular-nums;
+}
+
+.chip {
+  @apply inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium;
+}
+
+/* 화면 폭이 좁은 노트북·태블릿에서 차트가 가로 스크롤 없이 줄어들도록
+ * 차트 컨테이너에 사용. 카드 패딩 안쪽에서 동작. */
+.chart-frame {
+  position: relative;
+  width: 100%;
+}

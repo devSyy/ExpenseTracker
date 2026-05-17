@@ -1,0 +1,15 @@
+// 모든 리포지토리의 단일 엔트리 — 컴포저블/페이지는 여기서 import한다.
+export { createRepository } from './createRepository'
+export type { Repository, RepositoryOptions } from './createRepository'
+
+export { categoriesRepo, paymentsRepo, FALLBACK_CATEGORY, FALLBACK_PAYMENT } from './taxonomiesRepository'
+export { transactionsRepo, transactionsMetaRepo, saveTransactions, clearTransactions } from './transactionsRepository'
+export { incomeExpenseRepo } from './incomeExpenseRepository'
+export { assetsRepo, defaultAssetsState } from './assetsRepository'
+export { loansRepo, defaultLoanState } from './loansRepository'
+export { savingsInfoRepo, savingsHistoryRepo, defaultSavingsInfo } from './savingsRepository'
+export type { SavingsInfo, PaymentEntry } from './savingsRepository'
+export { cardsRepo, defaultCardState } from './cardsRepository'
+export type { CardItem, CardBenefitTier, CardKind, CardState } from './cardsRepository'
+export { familyRepo, defaultFamilyState, ROLE_OPTIONS, roleEmoji, roleColor } from './familyRepository'
+export type { FamilyMember, FamilyRole, FamilyState } from './familyRepository'
