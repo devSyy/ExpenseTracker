@@ -11,7 +11,16 @@ import { computed, ref } from 'vue'
 import { useExpenses } from '~/composables/useExpenses'
 import { useTaxonomies } from '~/composables/useTaxonomies'
 
-const { filters, availableYears, availableMonths, fileName } = useExpenses()
+const {
+  filters, availableYears, availableMonths, fileName,
+  transactions, filteredAll, hasPeriodFilter, clearPeriodFilter
+} = useExpenses()
+
+// 기본 기간이 "올해·이번 달"이므로, 과거 기간 파일을 올리면 화면이 비어 보일 수 있다.
+// 그 상황을 감지해 전체 기간으로 되돌릴 수 있는 안내를 띄운다.
+const periodHidesEverything = computed(
+  () => transactions.value.length > 0 && filteredAll.value.length === 0 && hasPeriodFilter.value
+)
 const { visibleCategoryNames, visiblePaymentNames } = useTaxonomies()
 
 // "이번달" 빠른 선택: 현재 월 데이터로 연도+월을 한 번에 설정
@@ -175,6 +184,22 @@ function clearAdvanced() {
     <div v-if="fileName" class="mt-3 text-xs text-slate-500">
       불러온 파일: <span class="font-medium text-slate-700">{{ fileName }}</span>
     </div>
+
+    <!-- 기간 필터 때문에 아무것도 안 보일 때 안내 -->
+    <p
+      v-if="periodHidesEverything"
+      class="mt-3 flex items-center justify-between gap-2 flex-wrap rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800"
+    >
+      <span>
+        선택한 기간({{ filters.year === 'all' ? '전체' : filters.year + '년' }}{{ filters.month === 'all' ? '' : ' ' + filters.month + '월' }})에 해당하는 거래가 없습니다.
+        불러온 데이터가 다른 기간일 수 있습니다.
+      </span>
+      <button
+        type="button"
+        class="px-2 py-1 rounded border border-amber-300 bg-white text-amber-800 hover:bg-amber-100 whitespace-nowrap"
+        @click="clearPeriodFilter"
+      >전체 기간 보기</button>
+    </p>
   </section>
 </template>
 

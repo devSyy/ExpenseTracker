@@ -6,6 +6,7 @@ import { computed, ref } from 'vue'
 import { useExpenses } from '~/composables/useExpenses'
 import { useTaxonomies } from '~/composables/useTaxonomies'
 import { downloadBackup, importFromJSON, type ImportStrategy } from '~/utils/backup'
+import type { TxType } from '~/utils/types'
 
 useHead({ title: '카테고리·결제수단 관리 · 가계부 대시보드' })
 
@@ -15,6 +16,9 @@ const {
   addCategory,
   renameCategory,
   setCategoryFixed,
+  setCategoryType,
+  incomeCategories,
+  expenseCategories,
   setCategoryHidden,
   removeCategory,
   moveCategory,
@@ -34,12 +38,15 @@ const {
   countByCategory,
   countByPayment,
   remapCategory,
-  remapPayment
+  remapPayment,
+  exportSnapshot
 } = useExpenses()
 
 // ── 새 항목 입력 폼 ──
 const newCategoryName = ref('')
 const newCategoryFixed = ref(false)
+/** 새 카테고리의 수입/지출 유형 */
+const newCategoryType = ref<TxType>('지출')
 const newPaymentName = ref('')
 
 // ── 인라인 이름 편집 상태 ──
@@ -59,11 +66,25 @@ function notify(kind: 'ok' | 'err', msg: string) {
 
 // ── 카테고리 액션 ──
 function onAddCategory() {
-  const r = addCategory(newCategoryName.value, newCategoryFixed.value)
+  const r = addCategory(newCategoryName.value, newCategoryFixed.value, newCategoryType.value)
   if (!r.ok) return notify('err', r.reason ?? '추가 실패')
-  notify('ok', `카테고리 추가됨: ${newCategoryName.value.trim()}`)
+  notify('ok', `${newCategoryType.value} 카테고리 추가됨: ${newCategoryName.value.trim()}`)
   newCategoryName.value = ''
   newCategoryFixed.value = false
+}
+
+/** 카테고리 유형 변경 — 이 카테고리를 쓰는 거래가 수입/지출 어느 쪽으로 집계될지 바뀐다. */
+function onChangeCategoryType(name: string, type: TxType) {
+  const usage = countByCategory(name)
+  if (usage > 0) {
+    const ok = window.confirm(
+      `'${name}' 카테고리를 '${type}'(으)로 변경합니다.\n` +
+      `이 카테고리를 사용하는 거래 ${usage.toLocaleString('ko-KR')}건이 앞으로 ${type} 계산에 반영됩니다.\n\n계속할까요?`
+    )
+    if (!ok) return
+  }
+  setCategoryType(name, type)
+  notify('ok', `'${name}' → ${type} 카테고리로 변경됨`)
 }
 
 function startEditCategory(name: string) {
@@ -174,7 +195,10 @@ const backupFileInput = ref<HTMLInputElement | null>(null)
 
 function onExportBackup() {
   try {
-    downloadBackup()
+    // 대시보드 거래는 '저장'을 눌러야 localStorage에 기록되므로, 저장소 값 대신
+    // 현재 메모리 상태를 넘겨 "화면에 보이는 그대로"를 내보낸다.
+    // (수입/지출 관리에서 미러링된 거래도 여기에 포함된다. 저장소는 건드리지 않는다)
+    downloadBackup(undefined, exportSnapshot())
     notify('ok', '백업 파일이 다운로드되었습니다')
   } catch (e) {
     notify('err', `다운로드 실패: ${(e as Error).message}`)
@@ -330,7 +354,10 @@ const visiblePaymentCount = computed(() => payments.value.filter((p) => !p.hidde
           <div>
             <h3 class="font-semibold text-slate-900">카테고리</h3>
             <p class="text-xs text-slate-500">
-              {{ categories.length }}개 등록 · 활성 {{ visibleCategoryCount }}개 ·
+              {{ categories.length }}개 등록 ·
+              <span class="text-rose-600 font-medium">지출 {{ expenseCategories.length }}</span> ·
+              <span class="text-blue-600 font-medium">수입 {{ incomeCategories.length }}</span> ·
+              활성 {{ visibleCategoryCount }}개 ·
               거래 {{ totalCategoryUsage.toLocaleString('ko-KR') }}건에 적용
             </p>
           </div>
@@ -338,14 +365,30 @@ const visiblePaymentCount = computed(() => payments.value.filter((p) => !p.hidde
 
         <!-- 추가 폼 -->
         <div class="flex flex-wrap items-center gap-2 mb-4">
+          <!-- 수입/지출 유형 선택 — 이 카테고리를 쓰는 거래가 어느 쪽으로 집계될지 결정 -->
+          <div class="type-toggle" role="group" aria-label="카테고리 유형">
+            <button
+              type="button"
+              :class="['type-toggle-btn', newCategoryType === '지출' ? 'is-expense' : '']"
+              @click="newCategoryType = '지출'"
+            >지출</button>
+            <button
+              type="button"
+              :class="['type-toggle-btn', newCategoryType === '수입' ? 'is-income' : '']"
+              @click="newCategoryType = '수입'"
+            >수입</button>
+          </div>
           <input
             v-model="newCategoryName"
             type="text"
-            placeholder="새 카테고리 이름"
+            :placeholder="`새 ${newCategoryType} 카테고리 이름`"
             class="flex-1 min-w-[10rem] rounded-md border-slate-300 text-sm focus:border-brand-500 focus:ring-brand-500"
             @keydown.enter="onAddCategory"
           />
-          <label class="flex items-center gap-1.5 text-xs text-slate-600 select-none">
+          <label
+            v-if="newCategoryType === '지출'"
+            class="flex items-center gap-1.5 text-xs text-slate-600 select-none"
+          >
             <input v-model="newCategoryFixed" type="checkbox" class="rounded" />
             고정비
           </label>
@@ -432,8 +475,27 @@ const visiblePaymentCount = computed(() => payments.value.filter((p) => !p.hidde
               {{ countByCategory(cat.name).toLocaleString('ko-KR') }}건
             </span>
 
-            <!-- 고정/변동 토글 -->
-            <label class="flex items-center gap-1 text-xs text-slate-600 select-none whitespace-nowrap">
+            <!-- 수입/지출 유형 -->
+            <div class="type-toggle type-toggle-sm" role="group" :aria-label="`${cat.name} 유형`">
+              <button
+                type="button"
+                :class="['type-toggle-btn', (cat.type ?? '지출') === '지출' ? 'is-expense' : '']"
+                title="지출 카테고리로 설정 — 지출 계산에 반영됩니다"
+                @click="onChangeCategoryType(cat.name, '지출')"
+              >지출</button>
+              <button
+                type="button"
+                :class="['type-toggle-btn', cat.type === '수입' ? 'is-income' : '']"
+                title="수입 카테고리로 설정 — 수입 계산에 반영됩니다"
+                @click="onChangeCategoryType(cat.name, '수입')"
+              >수입</button>
+            </div>
+
+            <!-- 고정/변동 토글 (지출 카테고리에만 해당) -->
+            <label
+              v-if="(cat.type ?? '지출') === '지출'"
+              class="flex items-center gap-1 text-xs text-slate-600 select-none whitespace-nowrap"
+            >
               <input
                 type="checkbox"
                 :checked="cat.isFixed"
@@ -442,6 +504,7 @@ const visiblePaymentCount = computed(() => payments.value.filter((p) => !p.hidde
               />
               고정비
             </label>
+            <span v-else class="text-xs text-slate-300 whitespace-nowrap select-none">–</span>
 
             <!-- 활성화 / 비활성화 토글 (체크 = 거래내역에 보임) -->
             <label
@@ -625,7 +688,8 @@ const visiblePaymentCount = computed(() => payments.value.filter((p) => !p.hidde
         <div>
           <h3 class="font-semibold text-slate-900">백업 · 복원</h3>
           <p class="text-xs text-slate-500 mt-0.5">
-            모든 데이터(카테고리·결제수단·거래내역·자산·대출·예금적금)를 하나의 JSON으로 내보내거나 되돌립니다.
+            모든 데이터(카테고리·결제수단·거래내역·수입/지출·가족·카드·자산·대출·예금적금)를 하나의 JSON으로 내보내거나 되돌립니다.
+            내보내기는 아직 저장하지 않은 거래내역 변경까지 현재 화면 그대로 담습니다.
           </p>
         </div>
         <div class="flex gap-2">
@@ -671,6 +735,7 @@ const visiblePaymentCount = computed(() => payments.value.filter((p) => !p.hidde
         <li><b>활성화/비활성화</b> 체크박스는 항목을 삭제하지 않고 거래내역의 필터·편집 드롭다운에서만 가립니다. 비활성화된 카테고리를 이미 사용 중인 거래는 그대로 유지됩니다.</li>
         <li><b>카테고리·결제수단 순서</b>는 좌측 ▲▼ 버튼 또는 행을 드래그하여 변경할 수 있습니다.</li>
         <li>고정비 체크는 새로 입력되거나 자동 분류되는 거래의 기본값에 영향을 주지만, 이미 입력된 거래의 구분 값을 강제로 바꾸지는 않습니다.</li>
+        <li><b>수입 / 지출</b> 유형은 그 카테고리를 사용하는 <b>모든 거래</b>에 즉시 적용됩니다. 수입 카테고리의 거래는 지출 합계·차트에서 빠지고 수입으로 집계됩니다. 기존 카테고리는 모두 <b>지출</b>로 유지됩니다.</li>
         <li>이 페이지에서 변경한 목록은 브라우저(localStorage)에 저장되어 새로고침 후에도 유지됩니다.</li>
       </ul>
     </section>
@@ -698,4 +763,43 @@ const visiblePaymentCount = computed(() => payments.value.filter((p) => !p.hidde
 }
 .fade-enter-active, .fade-leave-active { transition: opacity 0.2s ease; }
 .fade-enter-from, .fade-leave-to { opacity: 0; }
+
+/* ─────────────────────────────────────────
+ * 수입 / 지출 유형 토글
+ * ───────────────────────────────────────── */
+.type-toggle {
+  display: inline-flex;
+  flex-shrink: 0;
+  border: 1px solid rgb(226 232 240);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fff;
+}
+.type-toggle-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  line-height: 1.2;
+  color: rgb(100 116 139);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.type-toggle-btn:hover {
+  background: rgb(248 250 252);
+}
+.type-toggle-btn.is-expense {
+  background: rgb(254 242 242);
+  color: rgb(190 18 60);
+  font-weight: 700;
+}
+.type-toggle-btn.is-income {
+  background: rgb(239 246 255);
+  color: rgb(29 78 216);
+  font-weight: 700;
+}
+.type-toggle-sm .type-toggle-btn {
+  padding: 2px 7px;
+  font-size: 11px;
+}
 </style>

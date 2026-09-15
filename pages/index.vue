@@ -1,9 +1,18 @@
 <script setup lang="ts">
 import { computed, watch } from 'vue'
 import { useExpenses } from '~/composables/useExpenses'
+import { useFamily } from '~/composables/useFamily'
 
 const { transactions, warnings, reapplyDescriptionRules } = useExpenses()
-const hasData = computed(() => transactions.value.length > 0)
+const { hasActiveMember, activeMembers, isMemberActive } = useFamily()
+
+// 선택(체크)된 가족들의 거래 건수 — 필터와 무관하게 "합산 대상 데이터가 있는지"만 본다.
+const activeCount = computed(
+  () => transactions.value.filter((t) => isMemberActive(t.memberId)).length
+)
+const hasData = computed(() => hasActiveMember.value && activeCount.value > 0)
+const hasStoredButHidden = computed(() => !hasActiveMember.value && transactions.value.length > 0)
+const activeNames = computed(() => activeMembers.value.map((m) => m.name).join(' + '))
 
 // 거래가 새로 로드될 때마다(파일 업로드/새로고침 후 localStorage 복원 등)
 // 내용 기반 분류 룰을 자동 적용한다. 예: "출금 내역" / "입금 내역" → "입출금".
@@ -36,6 +45,12 @@ watch(
     </div>
 
     <template v-if="hasData">
+      <div v-if="activeMembers.length > 1" class="px-1 text-xs text-slate-500">
+        합산 표시 중: <b class="text-slate-700">{{ activeNames }}</b>
+        · 총 {{ activeCount.toLocaleString('ko-KR') }}건
+        <span class="text-slate-400">(가족별 데이터는 각각 독립 저장됩니다)</span>
+      </div>
+
       <FiltersBar />
       <KPICards />
 
@@ -72,10 +87,17 @@ watch(
 
     <section v-else class="card">
       <div class="py-10 text-center">
-        <div class="text-4xl">📊</div>
-        <h3 class="mt-3 text-lg font-semibold text-slate-900">아직 불러온 가계부가 없습니다</h3>
+        <div class="text-4xl">{{ hasStoredButHidden ? '👥' : '📊' }}</div>
+        <h3 class="mt-3 text-lg font-semibold text-slate-900">
+          {{ hasStoredButHidden ? '표시할 가족이 선택되지 않았습니다' : '아직 불러온 가계부가 없습니다' }}
+        </h3>
         <p class="mt-1 text-sm text-slate-500">
-          위에서 엑셀 파일을 업로드하거나 샘플 데이터를 불러와 대시보드를 둘러보세요.
+          <template v-if="hasStoredButHidden">
+            왼쪽 사이드바에서 가족 구성원을 체크하면 해당 가족의 가계부가 합산되어 표시됩니다.
+          </template>
+          <template v-else>
+            위에서 엑셀 파일을 업로드하거나 샘플 데이터를 불러와 대시보드를 둘러보세요.
+          </template>
         </p>
 
         <div class="mt-8 text-left max-w-2xl mx-auto grid sm:grid-cols-2 gap-4">

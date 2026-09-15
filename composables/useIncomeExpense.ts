@@ -1,7 +1,10 @@
 // 수입/지출 컴포저블 — incomeExpenseRepo 위에 액션을 얹은 얇은 레이어.
-import { computed } from 'vue'
+import { computed, watch } from 'vue'
 import { incomeExpenseRepo } from '~/repositories/incomeExpenseRepository'
+import { transactionsRepo } from '~/repositories/transactionsRepository'
 import { useFamily } from '~/composables/useFamily'
+import { useTaxonomies } from '~/composables/useTaxonomies'
+import { deriveFields } from '~/utils/classify'
 import type { Transaction } from '~/utils/types'
 
 export type TxKind = '수입' | '지출'
@@ -32,6 +35,22 @@ export const EXPENSE_CATEGORIES = [
   '문화/여가', '교육', '경조사', '카페/간식', '기타지출'
 ]
 export const PAYMENT_METHODS = ['계좌이체', '카드', '교통카드', '현금', '간편결제', '기타']
+
+// 카테고리 관리 화면에서 설정한 유형을 우선 사용하고, 아직 하나도 없으면 위 기본 목록으로 폴백한다.
+// (수입/지출 입력 폼의 카테고리 선택지 — 유형이 맞지 않는 카테고리는 애초에 노출되지 않는다)
+export const incomeCategoryOptions = computed<string[]>(() => {
+  const names = useTaxonomies().visibleIncomeCategoryNames.value
+  return names.length > 0 ? names : INCOME_CATEGORIES
+})
+export const expenseCategoryOptions = computed<string[]>(() => {
+  const names = useTaxonomies().visibleExpenseCategoryNames.value
+  return names.length > 0 ? names : EXPENSE_CATEGORIES
+})
+
+/** 카테고리 이름으로 수입/지출 판정 — 카테고리 관리 설정을 그대로 따른다. */
+function kindOfCategory(name: string): TxKind {
+  return useTaxonomies().categoryType((name ?? '').trim())
+}
 
 const allTransactions = incomeExpenseRepo.state
 
@@ -82,6 +101,97 @@ function remove(id: string): boolean {
   return allTransactions.value.length < before
 }
 
+// ── 대시보드 미러링 ──
+//
+// 수입/지출 관리에서 **수기로 입력한** 항목은 대시보드 거래 목록에도 그대로 반영되어
+// KPI·차트·카테고리 집계에 함께 잡혀야 한다. 반대로 "사용내역 가져오기"로 들어온
+// source='dashboard' 항목은 원래 대시보드에서 온 것이므로 되돌려 보내면 이중 계상이 된다.
+//
+// 추가/수정/삭제마다 개별 처리하면 경로를 빠뜨리기 쉬우므로, 미러링 대상 집합을
+// 통째로 다시 만들어 대시보드 배열의 미러 구간만 교체한다(멱등).
+// 대시보드 배열 쪽 변화(엑셀 업로드로 전체 교체 등)로 미러가 날아가도 다시 복구된다.
+
+const MIRROR_ID_PREFIX = 'ie::'
+
+/** 대시보드 거래가 수입/지출 관리에서 미러링된 것인지 */
+export function isIncomeExpenseMirror(t: Transaction): boolean {
+  return typeof t.ieSourceId === 'string' && t.ieSourceId !== ''
+}
+
+/** 수입/지출 항목 1건 → 대시보드 거래. 날짜가 잘못된 항목은 건너뛴다(null). */
+function toDashboardTransaction(t: IncomeExpenseTx): Transaction | null {
+  // 'YYYY-MM-DD'를 로컬 자정으로 해석한다 (new Date('YYYY-MM-DD')는 UTC라 하루 밀린다)
+  const d = new Date(`${t.date}T00:00:00`)
+  if (isNaN(d.getTime())) return null
+
+  const tax = useTaxonomies()
+  const category = (t.category ?? '').trim() || '기타'
+  return {
+    id: `${MIRROR_ID_PREFIX}${t.id}`,
+    ieSourceId: t.id,
+    date: d,
+    description: (t.description ?? '').trim() || category,
+    amount: Math.abs(Number(t.amount) || 0),
+    category,
+    paymentMethod: (t.paymentMethod ?? '').trim() || '기타결제',
+    costType: tax.isFixedCategory(category) ? '고정비' : '변동비',
+    note: (t.note ?? '').trim() || undefined,
+    memberId: t.memberId,
+    // 수입 카테고리는 대시보드 규칙대로 항상 지출 계산에서 제외 (enforceIncomeExclusion과 동일 판정)
+    excluded: tax.isIncomeCategory(category),
+    ...deriveFields(d)
+  }
+}
+
+/**
+ * 미러 비교용 서명.
+ * excluded는 일부러 제외한다 — 대시보드 쪽에서 사용자가 직접 켠 제외 플래그나
+ * 수입 자동 제외 규칙이 다시 덮어써지며 무한 루프가 되는 것을 막기 위해서다.
+ */
+function mirrorSignature(t: Transaction): string {
+  return [
+    t.id, t.date.getTime(), t.amount, t.category, t.paymentMethod,
+    t.costType, t.description, t.note ?? '', t.memberId ?? ''
+  ].join('|')
+}
+
+let syncingMirror = false
+function syncMirrorToDashboard(): void {
+  if (syncingMirror) return
+  syncingMirror = true
+  try {
+    const desired = allTransactions.value
+      .filter((t) => t.source !== 'dashboard')   // 가져온 항목은 되돌려 보내지 않는다
+      .map(toDashboardTransaction)
+      .filter((t): t is Transaction => t !== null)
+
+    const current = transactionsRepo.state.value
+    const existingMirrors = current.filter(isIncomeExpenseMirror)
+
+    const before = existingMirrors.map(mirrorSignature).sort().join('\n')
+    const after = desired.map(mirrorSignature).sort().join('\n')
+    if (before === after) return               // 달라진 게 없으면 배열을 건드리지 않는다
+
+    // 사용자가 대시보드에서 직접 켠 "지출 계산 제외"는 보존한다
+    const keptExcluded = new Map(existingMirrors.map((t) => [t.id, t.excluded === true]))
+    const merged = desired.map((t) =>
+      keptExcluded.get(t.id) === true ? { ...t, excluded: true } : t
+    )
+
+    transactionsRepo.state.value = [...current.filter((t) => !isIncomeExpenseMirror(t)), ...merged]
+      .sort((a, b) => a.date.getTime() - b.date.getTime())
+  } finally {
+    syncingMirror = false
+  }
+}
+
+// 수입/지출 항목이 바뀌면(추가·수정·삭제) 물론이고, 대시보드 배열이 통째로 바뀐 경우에도 다시 맞춘다.
+watch(
+  [allTransactions, transactionsRepo.state],
+  () => syncMirrorToDashboard(),
+  { flush: 'sync', immediate: true }
+)
+
 const totalIncome = computed(() =>
   transactions.value.filter((t) => t.kind === '수입').reduce((s, t) => s + t.amount, 0)
 )
@@ -116,6 +226,8 @@ function importFromDashboard(
 ): { added: number; skipped: number; removed: number } {
   const { onlyNew = true, replace = false, aggregateBy = 'monthCategory' } = options
   if (!Array.isArray(dashboardTxs)) return { added: 0, skipped: 0, removed: 0 }
+  // 이 화면에서 미러링해 올려보낸 거래는 다시 가져오지 않는다 (자기 항목의 중복 생성 방지)
+  dashboardTxs = dashboardTxs.filter((t) => !isIncomeExpenseMirror(t))
   const fam = useFamily()
   const primaryId = fam.primaryMemberId.value ?? undefined
 
@@ -170,7 +282,8 @@ function importFromDashboard(
       newEntries.push({
         id: `imp-agg-${g.ym}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
         date,
-        kind: '지출',
+        // 카테고리에 설정된 유형을 따른다 (수입 카테고리는 수입으로 들어간다)
+        kind: kindOfCategory(g.category),
         category: g.category,
         description: `${g.category} 합계`,
         paymentMethod,
@@ -193,7 +306,8 @@ function importFromDashboard(
       newEntries.push({
         id: `imp-${t.id}-${Date.now().toString(36)}`,
         date: dateStr,
-        kind: '지출',
+        // 카테고리에 설정된 유형을 따른다
+        kind: kindOfCategory((t.category ?? '').trim()),
         category: (t.category ?? '').trim(),
         description: (t.description ?? '').trim(),
         paymentMethod: (t.paymentMethod ?? '').trim(),
@@ -238,8 +352,12 @@ export function useIncomeExpense() {
     importFromDashboard,
     clearDashboardImports,
     dashboardImportCount,
+    isIncomeExpenseMirror,
     INCOME_CATEGORIES,
     EXPENSE_CATEGORIES,
+    incomeCategoryOptions,
+    expenseCategoryOptions,
+    kindOfCategory,
     PAYMENT_METHODS
   }
 }

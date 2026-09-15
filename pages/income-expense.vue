@@ -3,8 +3,8 @@
 import { computed, reactive, ref, watch } from 'vue'
 import {
   useIncomeExpense,
-  INCOME_CATEGORIES,
-  EXPENSE_CATEGORIES,
+  incomeCategoryOptions,
+  expenseCategoryOptions,
   PAYMENT_METHODS,
   type TxKind,
   type IncomeExpenseTx
@@ -20,13 +20,21 @@ const {
   remove,
   importFromDashboard,
   clearDashboardImports,
-  dashboardImportCount
+  dashboardImportCount,
+  isIncomeExpenseMirror
 } = useIncomeExpense()
-const { transactions: dashboardTxs } = useExpenses()
+const { transactions: allDashboardTxs } = useExpenses()
+
+/**
+ * 가져오기 대상이 되는 대시보드 사용내역.
+ * 이 화면에서 대시보드로 미러링해 올려보낸 항목은 원래 여기 것이므로 가져오기 대상이 아니다
+ * (건수 표시와 버튼 활성 조건도 같은 기준을 쓴다).
+ */
+const dashboardTxs = computed(() => allDashboardTxs.value.filter((t) => !isIncomeExpenseMirror(t)))
 
 // ── 사용내역에서 가져오기 ──
 //
-// 사용내역의 거래는 보통 과거 날짜를 갖는데, 이 페이지의 기본 필터는 "이번 달"이라
+// 사용내역의 거래는 보통 과거 날짜를 갖는데, 이 페이지의 기본 필터는 "최근 1개월"이라
 // 가져온 직후 거래 이력 테이블에 안 보일 수 있다. 그래서 가져오기 직후엔
 // 필터 날짜 범위를 전체 거래(가져온 것 포함)를 덮도록 자동 확장하고, 즉시 조회한다.
 function expandFilterToCoverAll() {
@@ -89,7 +97,7 @@ function notify(kind: 'ok' | 'err', text: string) {
 function emptyForm() {
   return {
     kind: '수입' as TxKind,
-    category: INCOME_CATEGORIES[0],
+    category: incomeCategoryOptions.value[0] ?? '',
     amount: null as number | null,
     date: new Date().toISOString().slice(0, 10),
     paymentMethod: PAYMENT_METHODS[0],
@@ -100,12 +108,12 @@ function emptyForm() {
 const form = reactive(emptyForm())
 
 const formCategoryOptions = computed(() =>
-  form.kind === '수입' ? INCOME_CATEGORIES : EXPENSE_CATEGORIES
+  form.kind === '수입' ? incomeCategoryOptions.value : expenseCategoryOptions.value
 )
 
 watch(() => form.kind, (k) => {
   // 구분 변경 시 카테고리 기본값 재설정
-  form.category = (k === '수입' ? INCOME_CATEGORIES : EXPENSE_CATEGORIES)[0]
+  form.category = (k === '수입' ? incomeCategoryOptions.value : expenseCategoryOptions.value)[0] ?? ''
 })
 
 function onResetForm() {
@@ -134,13 +142,33 @@ function onSubmit() {
 }
 
 // ── 필터 ──
-const today = new Date()
-const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1).toISOString().slice(0, 10)
-const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).toISOString().slice(0, 10)
+//
+// 기본 조회 범위는 **오늘 기준 최근 1개월** — 시작일 = 한 달 전 같은 날, 종료일 = 오늘.
+// 특정 날짜를 하드코딩하지 않으므로 해·달·일이 바뀌면 기본값도 자동으로 따라간다.
+
+/** Date → 'YYYY-MM-DD'. toISOString()은 UTC라 KST(UTC+9)에서 하루 밀리므로 로컬 기준으로 만든다. */
+function ymd(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
+/**
+ * n개월 전 같은 날. 대상 월에 그 날짜가 없으면 말일로 맞춘다.
+ * (3월 31일의 한 달 전은 2월 28/29일 — 보정하지 않으면 JS가 3월로 넘겨버린다)
+ */
+function monthsBefore(d: Date, months: number): Date {
+  const lastDayOfTarget = new Date(d.getFullYear(), d.getMonth() - months + 1, 0).getDate()
+  return new Date(d.getFullYear(), d.getMonth() - months, Math.min(d.getDate(), lastDayOfTarget))
+}
+
+/** 오늘 기준 기본 조회 범위 (최근 1개월) */
+function defaultDateRange(): { startDate: string; endDate: string } {
+  const today = new Date()
+  return { startDate: ymd(monthsBefore(today, 1)), endDate: ymd(today) }
+}
 
 const filterDraft = reactive({
-  startDate: startOfMonth,
-  endDate: endOfMonth,
+  ...defaultDateRange(),
   kind: 'all' as 'all' | TxKind,
   category: 'all' as string,
   paymentMethod: 'all' as string
@@ -176,7 +204,7 @@ const netProfit = computed(() => totalIncome.value - totalExpense.value)
 
 // 필터 카테고리 옵션은 양쪽 모두 + 데이터에서 발견된 추가 항목
 const filterCategoryOptions = computed<string[]>(() => {
-  const set = new Set<string>([...INCOME_CATEGORIES, ...EXPENSE_CATEGORIES])
+  const set = new Set<string>([...incomeCategoryOptions.value, ...expenseCategoryOptions.value])
   transactions.value.forEach((t) => set.add(t.category))
   return Array.from(set)
 })
@@ -264,7 +292,7 @@ const editDraft = reactive({
   note: ''
 })
 const editCategoryOptions = computed(() =>
-  editDraft.kind === '수입' ? INCOME_CATEGORIES : EXPENSE_CATEGORIES
+  editDraft.kind === '수입' ? incomeCategoryOptions.value : expenseCategoryOptions.value
 )
 
 function startEdit(t: IncomeExpenseTx) {

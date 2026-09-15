@@ -11,11 +11,19 @@ export interface BackupPayload {
 
 const CURRENT_VERSION = 1
 
-/** 현재 저장소의 모든 앱 키를 묶어 백업 객체로 반환. */
-export function exportAll(): BackupPayload {
+/**
+ * 현재 저장소의 모든 앱 키를 묶어 백업 객체로 반환.
+ *
+ * liveData: 저장소 값 대신 쓸 **현재 메모리 상태**(저장소 키 → 값).
+ * 명시 저장 방식인 대시보드 거래처럼 "저장 전에는 localStorage에 없는" 데이터를
+ * 내보내기에 담기 위한 것이다. 이 함수는 저장소에 아무것도 쓰지 않는다.
+ * 앱 키 목록에 없는 키는 무시한다.
+ */
+export function exportAll(liveData: Record<string, unknown> = {}): BackupPayload {
   const data: Record<string, unknown> = {}
   for (const k of APP_STORAGE_KEYS) {
-    const v = storage.getRaw(k)
+    const live = liveData[k]
+    const v = live !== undefined ? live : storage.getRaw(k)
     if (v != null) data[k] = v
   }
   return {
@@ -27,9 +35,9 @@ export function exportAll(): BackupPayload {
 }
 
 /** 브라우저에 백업 JSON 파일을 다운로드 시킨다. */
-export function downloadBackup(filename?: string): void {
+export function downloadBackup(filename?: string, liveData: Record<string, unknown> = {}): void {
   if (typeof document === 'undefined') return
-  const payload = exportAll()
+  const payload = exportAll(liveData)
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')

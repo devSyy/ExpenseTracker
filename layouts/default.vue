@@ -137,15 +137,14 @@ const navSub = 'block px-3 py-1.5 rounded-md text-xs text-slate-500 hover:text-s
               <input
                 type="checkbox"
                 :checked="isActive(m.id)"
-                :disabled="primaryMemberId === m.id"
-                :title="primaryMemberId === m.id ? '주 멤버는 항상 활성 (체크 불가)' : (isActive(m.id) ? '비활성화하기' : '활성화하기')"
+                :title="isActive(m.id) ? '선택 해제 (합산/업로드 대상에서 제외)' : '선택 (합산/업로드 대상에 포함)'"
                 @change="toggleActive(m.id)"
                 class="family-check"
               />
               <button
                 type="button"
                 class="family-name-btn"
-                :title="`주 멤버로 설정 (현재: ${m.role})`"
+                :title="`주 멤버(업로드 저장 대상)로 설정 (현재: ${m.role})`"
                 @click="setPrimary(m.id)"
               >
                 <span
@@ -165,6 +164,9 @@ const navSub = 'block px-3 py-1.5 rounded-md text-xs text-slate-500 hover:text-s
         >+ 가족 추가</NuxtLink>
         <p class="mt-1 px-2 text-[10px] text-slate-400 leading-tight">
           체크된 가족의 데이터가 합산되어 표시됩니다.
+          <template v-if="members.length > 0 && !members.some((m) => isActive(m.id))">
+            <br /><span class="text-amber-600">선택된 가족이 없어 업로드가 비활성화됩니다.</span>
+          </template>
         </p>
       </div>
 

@@ -4,7 +4,7 @@ import { useExpenses } from '~/composables/useExpenses'
 import { computeKPIs } from '~/utils/aggregate'
 import { formatKRW, formatNumber, formatDate } from '~/utils/format'
 
-const { filtered } = useExpenses()
+const { filtered, incomeTotal, netTotal } = useExpenses()
 const kpi = computed(() => computeKPIs(filtered.value))
 
 const dateRangeLabel = computed(() => {
@@ -26,6 +26,14 @@ const dateRangeLabel = computed(() => {
       <div class="kpi-label">총 지출</div>
       <div class="kpi-value mt-1">{{ formatKRW(kpi.total) }}</div>
       <div class="mt-2 text-xs text-slate-500">{{ dateRangeLabel }}</div>
+      <!-- 수입 카테고리 거래가 있을 때만 노출 (기존 4장 레이아웃 유지) -->
+      <div v-if="incomeTotal > 0" class="mt-1 text-xs">
+        <span class="text-blue-600 font-medium">수입 {{ formatKRW(incomeTotal) }}</span>
+        <span class="text-slate-400"> · 순수익 </span>
+        <span :class="netTotal >= 0 ? 'text-emerald-600 font-medium' : 'text-rose-600 font-medium'">
+          {{ formatKRW(netTotal) }}
+        </span>
+      </div>
     </div>
     <div class="card">
       <div class="kpi-label">월평균 지출</div>

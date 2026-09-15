@@ -21,17 +21,40 @@ const members = computed(() => state.value.members)
 const familyName = computed(() => state.value.familyName)
 
 const primaryMemberId = computed<string | null>(() => state.value.primaryMemberId)
-const activeMemberIds = computed<string[]>(() => {
-  const ids = state.value.activeMemberIds
-  if (ids.length === 0 && state.value.primaryMemberId) return [state.value.primaryMemberId]
-  return ids
-})
+/**
+ * 화면 표시/업로드 대상이 되는 활성 멤버 ID 목록.
+ * 빈 배열은 "선택된 가족 없음"을 의미하며, 이 경우 업로드가 비활성화되고 표시할 데이터도 없다.
+ */
+const activeMemberIds = computed<string[]>(() => state.value.activeMemberIds)
 const activeMembers = computed<FamilyMember[]>(() =>
   state.value.members.filter((m) => activeMemberIds.value.includes(m.id))
 )
+const hasActiveMember = computed<boolean>(() => activeMemberIds.value.length > 0)
 const primaryMember = computed<FamilyMember | null>(() =>
   state.value.members.find((m) => m.id === state.value.primaryMemberId) ?? state.value.members[0] ?? null
 )
+
+/**
+ * 업로드/저장의 실제 대상이 되는 멤버 ID.
+ * - 활성 멤버가 없으면 null (업로드 비활성화)
+ * - 주 멤버가 활성이면 주 멤버
+ * - 그 외에는 활성 멤버 중 첫 번째
+ */
+const uploadTargetMemberId = computed<string | null>(() => {
+  const ids = activeMemberIds.value
+  if (ids.length === 0) return null
+  const primary = state.value.primaryMemberId
+  if (primary && ids.includes(primary)) return primary
+  return ids[0] ?? null
+})
+const uploadTargetMember = computed<FamilyMember | null>(() =>
+  state.value.members.find((m) => m.id === uploadTargetMemberId.value) ?? null
+)
+
+function memberName(id: string | null | undefined): string {
+  if (!id) return ''
+  return state.value.members.find((m) => m.id === id)?.name ?? ''
+}
 
 /** activeMemberIds.set: 멤버 ID 집합 (필터/합산 시 사용) */
 const activeMemberSet = computed(() => new Set(activeMemberIds.value))
@@ -58,12 +81,24 @@ function toggleActive(id: string) {
   if (!state.value.members.some((m) => m.id === id)) return
   const active = state.value.activeMemberIds
   if (active.includes(id)) {
-    // primary는 비활성화 불가 (항상 활성)
-    if (id === state.value.primaryMemberId) return
+    // 주 멤버도 해제 가능하다. 전원 해제 시 = "선택된 가족 없음" (업로드 비활성화)
     state.value = { ...state.value, activeMemberIds: active.filter((x) => x !== id) }
   } else {
     state.value = { ...state.value, activeMemberIds: [...active, id] }
   }
+}
+
+/** 여러 명이 선택된 상태에서 업로드/저장 대상만 바꾼다 (선택 집합은 유지). */
+function setUploadTarget(id: string) {
+  if (!state.value.members.some((m) => m.id === id)) return
+  const active = state.value.activeMemberIds.includes(id)
+    ? state.value.activeMemberIds
+    : [...state.value.activeMemberIds, id]
+  state.value = { ...state.value, primaryMemberId: id, activeMemberIds: active }
+}
+
+function deactivateAll() {
+  state.value = { ...state.value, activeMemberIds: [] }
 }
 
 function activateAll() {
@@ -152,13 +187,19 @@ export function useFamily() {
     activeMembers,
     activeMemberIds,
     activeMemberSet,
+    hasActiveMember,
+    uploadTargetMemberId,
+    uploadTargetMember,
+    memberName,
     isActive,
     isMemberActive,
     setFamilyName,
     setPrimary,
+    setUploadTarget,
     toggleActive,
     activateAll,
     activateOnly,
+    deactivateAll,
     addMember,
     updateMember,
     removeMember,

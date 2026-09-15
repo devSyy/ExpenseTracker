@@ -98,6 +98,8 @@ export const familyRepo = createRepository<FamilyState>({
 
     let active: string[]
     if (Array.isArray(r.activeMemberIds)) {
+      // 빈 배열은 "전원 비활성(선택 없음)"이라는 사용자의 명시적 상태이므로 그대로 유지한다.
+      // (선택 없음 = 업로드 비활성화 / 표시할 데이터 없음)
       active = r.activeMemberIds.filter((id: unknown) =>
         typeof id === 'string' && members.some((m) => m.id === id)
       )
@@ -105,7 +107,6 @@ export const familyRepo = createRepository<FamilyState>({
       // 구버전 단일 활성 멤버 → 모든 멤버 합산을 기본으로 (사용자 의도: 모든 데이터 합산)
       active = members.map((m) => m.id)
     }
-    if (active.length === 0 && primary) active = [primary]
 
     return {
       familyName: typeof r.familyName === 'string' ? r.familyName : def.familyName,

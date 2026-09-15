@@ -44,6 +44,32 @@ export const DEFAULT_CATEGORIES = [
 /** 고정비 / 변동비 */
 export type CostType = '고정비' | '변동비'
 
+/**
+ * 거래 유형 — 카테고리가 수입/지출 중 어디에 속하는지.
+ * 카테고리 관리 화면에서 설정하며, 거래는 자기 카테고리의 유형을 따른다.
+ */
+export type TxType = '수입' | '지출'
+
+/**
+ * 결제 취소/환불 거래에 자동 부여되는 카테고리 이름.
+ * 카테고리 관리 목록에 없으면 리포지토리가 자동으로 만들어 준다(필수 카테고리).
+ */
+export const REFUND_CATEGORY = '환불'
+
+/** 유형이 지정되지 않은 카테고리의 기본값 (구버전 데이터 호환 — 기존 동작 유지) */
+export const DEFAULT_TX_TYPE: TxType = '지출'
+
+/** 신규 설치 시 기본 제공되는 수입 카테고리 */
+export const DEFAULT_INCOME_CATEGORIES = [
+  '급여',
+  '보너스',
+  '용돈',
+  '이자',
+  '환급',
+  '판매수입',
+  '기타수입'
+] as const
+
 /** 기본적으로 고정비로 처리되는 카테고리 (초기값) */
 export const DEFAULT_FIXED_CATEGORIES = [
   '공과금',
@@ -55,11 +81,16 @@ export const DEFAULT_FIXED_CATEGORIES = [
   '주거'
 ] as const
 
-/** 카테고리 정의 — 이름 + 고정비 여부 + 표시 여부 */
+/** 카테고리 정의 — 이름 + 수입/지출 유형 + 고정비 여부 + 표시 여부 */
 export interface CategoryDef {
   name: string
   isFixed: boolean
   hidden?: boolean
+  /**
+   * 수입/지출 구분. 값이 없으면(구버전 저장 데이터) '지출'로 간주한다.
+   * 리포지토리 로드 시 항상 채워지므로 런타임에서는 사실상 필수다.
+   */
+  type?: TxType
 }
 
 /** 결제수단 정의 — 이름 + 표시 여부 */
@@ -90,6 +121,34 @@ export interface Transaction {
   note?: string
   /** 가족 멤버 ID — 활성 멤버 필터/합산에 사용. 비어있으면 primary 소속으로 간주. */
   memberId?: string
+  /**
+   * 지출 계산 제외 플래그.
+   * true면 KPI·차트·집계 등 모든 지출 계산에서 이 거래의 금액을 빼지만,
+   * 거래 자체는 그대로 저장되고 거래 목록에도 계속 보인다.
+   * 값이 없으면(구버전 데이터 포함) false = 제외 안 함.
+   */
+  excluded?: boolean
+  /**
+   * 원본 금액이 **음수**였는지 (사실 그대로의 기록).
+   * -12,000 / (12,000) / 12,000- / △12,000 등이 모두 해당한다.
+   * amount에는 크기(절대값)를 보관하므로 원본 금액은 -amount로 복원할 수 있다.
+   * 음수 금액은 "쓴 돈"이 아니므로 환불로 분류되지 않더라도 지출 합계에는 넣지 않는다.
+   * 값이 없으면(구버전 데이터 포함) false = 양수 거래.
+   */
+  negativeAmount?: boolean
+  /**
+   * **환불로 분류된 거래**인지.
+   * 음수라고 무조건 true가 아니다 — 유형이 지출이고, 같은 금액의 양수 지출 거래가
+   * 짝으로 존재할 때만 true가 되며 그때 카테고리가 REFUND_CATEGORY('환불')로 바뀐다.
+   * 짝을 찾지 못한 음수 지출은 원래 카테고리를 그대로 유지한다(refund=false).
+   */
+  refund?: boolean
+  /**
+   * **수입/지출 관리에서 수기 입력한 항목을 대시보드로 미러링한 거래**일 때, 그 원본 항목의 id.
+   * 이 값이 있는 거래는 대시보드가 소유한 것이 아니라 useIncomeExpense가 동기화하는 거래다
+   * (원본이 수정·삭제되면 함께 갱신된다). 값이 없으면 대시보드 고유 거래.
+   */
+  ieSourceId?: string
   // 사전 계산된 파생 필드 (필터/그룹용)
   year: number                    // 2026
   month: number                   // 1..12
@@ -108,4 +167,23 @@ export interface ParseResult {
   warnings: string[]
   detectedColumns: Record<string, string>
   totalRows: number
+
+  // ── 진단 정보 (선택) ──
+  // 업로드가 실패했을 때 "왜 인식하지 못했는지"를 사용자에게 보여주기 위한 필드들.
+  /** 실제로 사용한 시트 이름 */
+  sheetName?: string
+  /** 워크북의 전체 시트 목록 */
+  sheetNames?: string[]
+  /** 헤더로 인식한 행 번호 (1-based) */
+  headerRow?: number
+  /** 헤더 행의 원본 셀 값 */
+  headers?: string[]
+  /** 텍스트 파일일 때 사용한 인코딩 */
+  encoding?: string
+  /** 건너뛴 행 수 */
+  skipped?: { noDate: number; noAmount: number; blank: number }
+  /** 환불로 분류한 건수 (짝이 맞은 음수 지출) */
+  refundCount?: number
+  /** 음수지만 짝이 없어 환불로 분류하지 않은 건수 */
+  unmatchedNegativeCount?: number
 }
