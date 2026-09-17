@@ -10,7 +10,7 @@
 // 기존 아키텍처(모듈 스코프 상태 + use* 접근자)를 그대로 따르며 새 상태관리 라이브러리는 도입하지 않는다.
 import { computed, reactive } from 'vue'
 import { parseExpenseFile, isSupportedFileName, SUPPORTED_EXTENSIONS } from '~/utils/parseExcel'
-import { useExpenses, type MemberSaveResult, type SaveMode } from '~/composables/useExpenses'
+import { applyPaymentMappings, useExpenses, type MemberSaveResult, type SaveMode } from '~/composables/useExpenses'
 import { useFamily } from '~/composables/useFamily'
 import { useTaxonomies } from '~/composables/useTaxonomies'
 import type { ParseResult, Transaction } from '~/utils/types'
@@ -184,8 +184,13 @@ async function handleFile(memberId: string | null | undefined, file: File): Prom
     return
   }
 
-  slot.transactions = result.transactions
-  slot.duplicateInFile = countDuplicates(result.transactions)
+  // 결제수단 → 카테고리 매핑 적용.
+  // 파싱이 끝난 뒤(= 환불 짝짓기까지 끝난 뒤)에 적용하므로 환불로 분류된 거래는 보호되며,
+  // 미리보기에도 실제로 저장될 카테고리가 그대로 보인다. 매핑이 없으면 원본 그대로다.
+  const mapped = applyPaymentMappings(result.transactions)
+
+  slot.transactions = mapped
+  slot.duplicateInFile = countDuplicates(mapped)
   slot.status = 'ready'
   slot.error = ''
   slot.message = ''

@@ -118,5 +118,9 @@ export const APP_STORAGE_KEYS = [
   // cards
   'cards:state:v1',
   // family
-  'family:state:v1'
+  'family:state:v1',
+  // contracts
+  'contracts:state:v1',
+  // anniversaries
+  'anniversaries:state:v1'
 ] as const

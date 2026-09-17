@@ -6,7 +6,10 @@ import { computed, ref } from 'vue'
 import { useExpenses } from '~/composables/useExpenses'
 import { useTaxonomies } from '~/composables/useTaxonomies'
 import { downloadBackup, importFromJSON, type ImportStrategy } from '~/utils/backup'
-import type { TxType } from '~/utils/types'
+import { REFUND_CATEGORY, type PaymentTag, type TxType } from '~/utils/types'
+
+/** 안내 문구에서 쓰는 환불 카테고리 이름 (자동 배정에서 보호되는 카테고리) */
+const REFUND_CATEGORY_LABEL = REFUND_CATEGORY
 
 useHead({ title: '카테고리·결제수단 관리 · 가계부 대시보드' })
 
@@ -23,12 +26,21 @@ const {
   removeCategory,
   moveCategory,
   reorderCategories,
+  visibleCategoryNames,
+  visibleExpenseCategoryNames,
+  visibleIncomeCategoryNames,
   addPayment,
   renamePayment,
   setPaymentHidden,
   removePayment,
   movePayment,
   reorderPayments,
+  paymentTag,
+  setPaymentTag,
+  paymentCategoryMap,
+  paymentMappedCategory,
+  setPaymentCategoryMap,
+  mappedPaymentCount,
   resetToDefaults,
   FALLBACK_CATEGORY,
   FALLBACK_PAYMENT
@@ -48,6 +60,8 @@ const newCategoryFixed = ref(false)
 /** 새 카테고리의 수입/지출 유형 */
 const newCategoryType = ref<TxType>('지출')
 const newPaymentName = ref('')
+/** 새 결제수단의 소비/저축 태그 */
+const newPaymentTag = ref<PaymentTag>('소비')
 
 // ── 인라인 이름 편집 상태 ──
 const editingCategory = ref<string | null>(null)
@@ -131,10 +145,56 @@ function onRemoveCategory(name: string) {
 
 // ── 결제수단 액션 ──
 function onAddPayment() {
-  const r = addPayment(newPaymentName.value)
+  const r = addPayment(newPaymentName.value, newPaymentTag.value)
   if (!r.ok) return notify('err', r.reason ?? '추가 실패')
-  notify('ok', `결제수단 추가됨: ${newPaymentName.value.trim()}`)
+  notify('ok', `${newPaymentTag.value} 결제수단 추가됨: ${newPaymentName.value.trim()}`)
   newPaymentName.value = ''
+}
+
+// ── 결제수단 태그(소비/저축) · 카테고리 매핑 ──
+//
+// 태그는 이 결제수단으로 나간 돈의 성격을, 매핑은 "그 결제수단이 선택되면 어떤 카테고리로
+// 배정할지"를 정한다. 매핑은 태그별로 따로 보관되므로 태그를 바꿔도 반대쪽 매핑은 남아 있다.
+// 태그·매핑 변경은 **기존 거래를 바꾸지 않는다** — 앞으로 결제수단이 선택될 때부터 적용된다.
+
+function onChangePaymentTag(name: string, tag: PaymentTag) {
+  if (paymentTag(name) === tag) return
+  setPaymentTag(name, tag)
+  const mapped = paymentCategoryMap(name, tag)
+  notify(
+    'ok',
+    mapped
+      ? `'${name}' → ${tag} 태그로 변경됨 · 매핑 카테고리 ${mapped}`
+      : `'${name}' → ${tag} 태그로 변경됨 (매핑된 카테고리 없음)`
+  )
+}
+
+/** 현재 태그의 매핑 카테고리를 설정/해제한다. 빈 값이면 해제. */
+function onChangePaymentCategoryMap(name: string, value: string) {
+  const tag = paymentTag(name)
+  const r = setPaymentCategoryMap(name, tag, value)
+  if (!r.ok) return notify('err', r.reason ?? '매핑 실패')
+  notify(
+    'ok',
+    value
+      ? `'${name}'(${tag}) → 카테고리 '${value}' 매핑됨 · 이후 이 결제수단을 선택하면 자동 배정됩니다`
+      : `'${name}'(${tag}) 카테고리 매핑 해제됨`
+  )
+}
+
+/** 목록 렌더용 — 현재 태그에 저장된 매핑 값 (select의 v-model 대신 :value로 사용) */
+function paymentMapValue(name: string): string {
+  return paymentCategoryMap(name, paymentTag(name)) ?? ''
+}
+
+/**
+ * 매핑된 카테고리가 목록에 남아 있지 않거나 비활성화되어 실제로는 적용되지 않는 상태인지.
+ * (삭제 시에는 매핑이 자동 해제되므로 주로 '비활성화' 상태를 잡아낸다)
+ */
+function isPaymentMapInactive(name: string): boolean {
+  const raw = paymentMapValue(name)
+  if (!raw) return false
+  return paymentMappedCategory(name) !== raw
 }
 
 function startEditPayment(name: string) {
@@ -315,6 +375,8 @@ const totalPaymentUsage = computed(() =>
 )
 const visibleCategoryCount = computed(() => categories.value.filter((c) => !c.hidden).length)
 const visiblePaymentCount = computed(() => payments.value.filter((p) => !p.hidden).length)
+const savingsPaymentCount = computed(() => payments.value.filter((p) => p.tag === '저축').length)
+const consumptionPaymentCount = computed(() => payments.value.length - savingsPaymentCount.value)
 </script>
 
 <template>
@@ -326,6 +388,7 @@ const visiblePaymentCount = computed(() => payments.value.filter((p) => !p.hidde
         <h2 class="text-xl font-bold text-slate-900">카테고리 · 결제수단 관리</h2>
         <p class="text-sm text-slate-500 mt-1">
           여기서 변경한 목록은 거래내역 화면의 분류 옵션과 필터에 즉시 반영되며 브라우저에 저장됩니다.
+          결제수단에 <b>카테고리 매핑</b>을 지정하면 그 결제수단이 선택된 거래의 카테고리가 자동으로 맞춰집니다.
         </p>
       </div>
       <div class="flex gap-2">
@@ -553,7 +616,11 @@ const visiblePaymentCount = computed(() => payments.value.filter((p) => !p.hidde
           <div>
             <h3 class="font-semibold text-slate-900">결제수단</h3>
             <p class="text-xs text-slate-500">
-              {{ payments.length }}개 등록 · 표시 {{ visiblePaymentCount }}개 ·
+              {{ payments.length }}개 등록 ·
+              <span class="text-amber-600 font-medium">소비 {{ consumptionPaymentCount }}</span> ·
+              <span class="text-teal-600 font-medium">저축 {{ savingsPaymentCount }}</span> ·
+              표시 {{ visiblePaymentCount }}개 ·
+              카테고리 매핑 {{ mappedPaymentCount }}개 ·
               거래 {{ totalPaymentUsage.toLocaleString('ko-KR') }}건에 적용
             </p>
           </div>
@@ -561,10 +628,23 @@ const visiblePaymentCount = computed(() => payments.value.filter((p) => !p.hidde
 
         <!-- 추가 폼 -->
         <div class="flex flex-wrap items-center gap-2 mb-4">
+          <!-- 소비/저축 태그 선택 -->
+          <div class="type-toggle" role="group" aria-label="결제수단 태그">
+            <button
+              type="button"
+              :class="['type-toggle-btn', newPaymentTag === '소비' ? 'is-consume' : '']"
+              @click="newPaymentTag = '소비'"
+            >소비</button>
+            <button
+              type="button"
+              :class="['type-toggle-btn', newPaymentTag === '저축' ? 'is-savings' : '']"
+              @click="newPaymentTag = '저축'"
+            >저축</button>
+          </div>
           <input
             v-model="newPaymentName"
             type="text"
-            placeholder="새 결제수단 이름"
+            :placeholder="`새 ${newPaymentTag} 결제수단 이름`"
             class="flex-1 min-w-[10rem] rounded-md border-slate-300 text-sm focus:border-brand-500 focus:ring-brand-500"
             @keydown.enter="onAddPayment"
           />
@@ -583,7 +663,7 @@ const visiblePaymentCount = computed(() => payments.value.filter((p) => !p.hidde
             @drop="onPaymentDrop(idx, $event)"
             @dragend="onPaymentDragEnd"
             :class="[
-              'flex items-center gap-2 px-3 py-2 hover:bg-slate-50/60 transition-colors',
+              'px-3 py-2 hover:bg-slate-50/60 transition-colors',
               pm.hidden ? 'bg-slate-50/80 text-slate-400' : 'bg-white',
               draggedPaymentIdx === idx ? 'opacity-40' : '',
               dragOverPaymentIdx === idx && draggedPaymentIdx !== null && draggedPaymentIdx !== idx
@@ -591,88 +671,147 @@ const visiblePaymentCount = computed(() => payments.value.filter((p) => !p.hidde
                 : ''
             ]"
           >
-            <!-- 드래그 핸들 -->
-            <span
-              class="drag-handle text-slate-400 cursor-grab active:cursor-grabbing select-none"
-              title="드래그하여 순서 변경"
-              aria-hidden="true"
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                <circle cx="9" cy="6" r="1.5"/>
-                <circle cx="15" cy="6" r="1.5"/>
-                <circle cx="9" cy="12" r="1.5"/>
-                <circle cx="15" cy="12" r="1.5"/>
-                <circle cx="9" cy="18" r="1.5"/>
-                <circle cx="15" cy="18" r="1.5"/>
-              </svg>
-            </span>
+            <!-- 1행: 순서 · 이름 · 사용량 · 표시/숨김 · 액션 (기존 레이아웃 유지) -->
+            <div class="flex items-center gap-2">
+              <!-- 드래그 핸들 -->
+              <span
+                class="drag-handle text-slate-400 cursor-grab active:cursor-grabbing select-none"
+                title="드래그하여 순서 변경"
+                aria-hidden="true"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                  <circle cx="9" cy="6" r="1.5"/>
+                  <circle cx="15" cy="6" r="1.5"/>
+                  <circle cx="9" cy="12" r="1.5"/>
+                  <circle cx="15" cy="12" r="1.5"/>
+                  <circle cx="9" cy="18" r="1.5"/>
+                  <circle cx="15" cy="18" r="1.5"/>
+                </svg>
+              </span>
 
-            <div class="flex flex-col text-slate-400 text-[10px] leading-none">
-              <button
-                type="button"
-                class="hover:text-slate-700 disabled:opacity-30 disabled:hover:text-slate-400"
-                :disabled="idx === 0"
-                @click="movePayment(pm.name, -1)"
-                title="위로"
-              >▲</button>
-              <button
-                type="button"
-                class="hover:text-slate-700 disabled:opacity-30 disabled:hover:text-slate-400"
-                :disabled="idx === payments.length - 1"
-                @click="movePayment(pm.name, 1)"
-                title="아래로"
-              >▼</button>
-            </div>
-
-            <div class="flex-1 min-w-0">
-              <template v-if="editingPayment === pm.name">
-                <input
-                  v-model="editingPaymentName"
-                  type="text"
-                  class="w-full rounded-md border-slate-300 text-sm focus:border-brand-500 focus:ring-brand-500"
-                  @keydown.enter="commitEditPayment"
-                  @keydown.esc="cancelEditPayment"
-                />
-              </template>
-              <template v-else>
+              <div class="flex flex-col text-slate-400 text-[10px] leading-none">
                 <button
                   type="button"
-                  class="text-sm text-slate-900 hover:underline truncate text-left"
-                  @click="startEditPayment(pm.name)"
-                  title="클릭하여 이름 변경"
-                >{{ pm.name }}</button>
-              </template>
-            </div>
-
-            <span class="text-xs text-slate-400 tabular-nums whitespace-nowrap">
-              {{ countByPayment(pm.name).toLocaleString('ko-KR') }}건
-            </span>
-
-            <!-- 표시/숨김 토글 -->
-            <button
-              type="button"
-              :class="['btn-mini', pm.hidden ? 'btn-mini-active' : '']"
-              :title="pm.hidden ? '숨김 상태 — 클릭하여 표시' : '표시 상태 — 클릭하여 숨김'"
-              @click="onTogglePaymentHidden(pm.name, !pm.hidden)"
-            >
-              {{ pm.hidden ? '숨김' : '표시' }}
-            </button>
-
-            <div class="flex gap-1">
-              <template v-if="editingPayment === pm.name">
-                <button type="button" class="btn-mini-primary" @click="commitEditPayment">저장</button>
-                <button type="button" class="btn-mini" @click="cancelEditPayment">취소</button>
-              </template>
-              <template v-else>
-                <button type="button" class="btn-mini" @click="startEditPayment(pm.name)">이름</button>
+                  class="hover:text-slate-700 disabled:opacity-30 disabled:hover:text-slate-400"
+                  :disabled="idx === 0"
+                  @click="movePayment(pm.name, -1)"
+                  title="위로"
+                >▲</button>
                 <button
                   type="button"
-                  class="btn-mini-danger"
-                  :disabled="pm.name === FALLBACK_PAYMENT"
-                  :title="pm.name === FALLBACK_PAYMENT ? '폴백 결제수단은 삭제할 수 없습니다' : '삭제'"
-                  @click="onRemovePayment(pm.name)"
-                >삭제</button>
-              </template>
+                  class="hover:text-slate-700 disabled:opacity-30 disabled:hover:text-slate-400"
+                  :disabled="idx === payments.length - 1"
+                  @click="movePayment(pm.name, 1)"
+                  title="아래로"
+                >▼</button>
+              </div>
+
+              <div class="flex-1 min-w-0">
+                <template v-if="editingPayment === pm.name">
+                  <input
+                    v-model="editingPaymentName"
+                    type="text"
+                    class="w-full rounded-md border-slate-300 text-sm focus:border-brand-500 focus:ring-brand-500"
+                    @keydown.enter="commitEditPayment"
+                    @keydown.esc="cancelEditPayment"
+                  />
+                </template>
+                <template v-else>
+                  <button
+                    type="button"
+                    class="text-sm text-slate-900 hover:underline truncate text-left"
+                    @click="startEditPayment(pm.name)"
+                    title="클릭하여 이름 변경"
+                  >{{ pm.name }}</button>
+                </template>
+              </div>
+
+              <span class="text-xs text-slate-400 tabular-nums whitespace-nowrap">
+                {{ countByPayment(pm.name).toLocaleString('ko-KR') }}건
+              </span>
+
+              <!-- 소비 / 저축 태그 -->
+              <div class="type-toggle type-toggle-sm" role="group" :aria-label="`${pm.name} 태그`">
+                <button
+                  type="button"
+                  :class="['type-toggle-btn', paymentTag(pm.name) === '소비' ? 'is-consume' : '']"
+                  title="소비 — 실제로 쓴 돈. 소비 태그에 매핑된 카테고리가 적용됩니다"
+                  @click="onChangePaymentTag(pm.name, '소비')"
+                >소비</button>
+                <button
+                  type="button"
+                  :class="['type-toggle-btn', paymentTag(pm.name) === '저축' ? 'is-savings' : '']"
+                  title="저축 — 자산으로 옮긴 돈. 저축 태그에 매핑된 카테고리가 적용됩니다"
+                  @click="onChangePaymentTag(pm.name, '저축')"
+                >저축</button>
+              </div>
+
+              <!-- 표시/숨김 토글 -->
+              <button
+                type="button"
+                :class="['btn-mini', pm.hidden ? 'btn-mini-active' : '']"
+                :title="pm.hidden ? '숨김 상태 — 클릭하여 표시' : '표시 상태 — 클릭하여 숨김'"
+                @click="onTogglePaymentHidden(pm.name, !pm.hidden)"
+              >
+                {{ pm.hidden ? '숨김' : '표시' }}
+              </button>
+
+              <div class="flex gap-1">
+                <template v-if="editingPayment === pm.name">
+                  <button type="button" class="btn-mini-primary" @click="commitEditPayment">저장</button>
+                  <button type="button" class="btn-mini" @click="cancelEditPayment">취소</button>
+                </template>
+                <template v-else>
+                  <button type="button" class="btn-mini" @click="startEditPayment(pm.name)">이름</button>
+                  <button
+                    type="button"
+                    class="btn-mini-danger"
+                    :disabled="pm.name === FALLBACK_PAYMENT"
+                    :title="pm.name === FALLBACK_PAYMENT ? '폴백 결제수단은 삭제할 수 없습니다' : '삭제'"
+                    @click="onRemovePayment(pm.name)"
+                  >삭제</button>
+                </template>
+              </div>
+            </div>
+
+            <!--
+              2행: 카테고리 매핑.
+              현재 태그에 매핑된 카테고리를 고르면, 이후 이 결제수단이 선택된 거래에
+              그 카테고리가 자동 배정된다. 매핑은 태그별로 따로 보관된다.
+            -->
+            <div class="mt-1.5 flex items-center gap-2 flex-wrap pl-[2.1rem]">
+              <label class="text-[11px] text-slate-500 whitespace-nowrap">
+                {{ paymentTag(pm.name) }} 카테고리 매핑
+              </label>
+              <select
+                class="map-select"
+                :value="paymentMapValue(pm.name)"
+                :title="`'${pm.name}'(${paymentTag(pm.name)}) 선택 시 자동 배정할 카테고리`"
+                @change="onChangePaymentCategoryMap(pm.name, ($event.target as HTMLSelectElement).value)"
+              >
+                <option value="">— 매핑 없음 —</option>
+                <option
+                  v-if="paymentMapValue(pm.name) && !visibleCategoryNames.includes(paymentMapValue(pm.name))"
+                  :value="paymentMapValue(pm.name)"
+                >
+                  {{ paymentMapValue(pm.name) }} (비활성)
+                </option>
+                <optgroup label="지출">
+                  <option v-for="c in visibleExpenseCategoryNames" :key="`pe-${pm.name}-${c}`" :value="c">{{ c }}</option>
+                </optgroup>
+                <optgroup v-if="visibleIncomeCategoryNames.length > 0" label="수입">
+                  <option v-for="c in visibleIncomeCategoryNames" :key="`pi-${pm.name}-${c}`" :value="c">{{ c }}</option>
+                </optgroup>
+              </select>
+              <span
+                v-if="isPaymentMapInactive(pm.name)"
+                class="text-[11px] text-amber-600"
+                title="매핑된 카테고리가 비활성화되어 자동 배정이 적용되지 않습니다. 카테고리를 다시 활성화하면 되살아납니다."
+              >비활성 카테고리 — 적용 안 됨</span>
+              <span
+                v-else-if="paymentMapValue(pm.name)"
+                class="text-[11px] text-slate-400"
+              >이 결제수단 선택 시 자동 배정</span>
             </div>
           </li>
           <li v-if="payments.length === 0" class="px-3 py-6 text-center text-slate-400 text-sm bg-white">
@@ -688,7 +827,7 @@ const visiblePaymentCount = computed(() => payments.value.filter((p) => !p.hidde
         <div>
           <h3 class="font-semibold text-slate-900">백업 · 복원</h3>
           <p class="text-xs text-slate-500 mt-0.5">
-            모든 데이터(카테고리·결제수단·거래내역·수입/지출·가족·카드·자산·대출·예금적금)를 하나의 JSON으로 내보내거나 되돌립니다.
+            모든 데이터(카테고리·결제수단·거래내역·수입/지출·가족·카드·자산·대출·예금적금·계약·기념일)를 하나의 JSON으로 내보내거나 되돌립니다.
             내보내기는 아직 저장하지 않은 거래내역 변경까지 현재 화면 그대로 담습니다.
           </p>
         </div>
@@ -736,6 +875,10 @@ const visiblePaymentCount = computed(() => payments.value.filter((p) => !p.hidde
         <li><b>카테고리·결제수단 순서</b>는 좌측 ▲▼ 버튼 또는 행을 드래그하여 변경할 수 있습니다.</li>
         <li>고정비 체크는 새로 입력되거나 자동 분류되는 거래의 기본값에 영향을 주지만, 이미 입력된 거래의 구분 값을 강제로 바꾸지는 않습니다.</li>
         <li><b>수입 / 지출</b> 유형은 그 카테고리를 사용하는 <b>모든 거래</b>에 즉시 적용됩니다. 수입 카테고리의 거래는 지출 합계·차트에서 빠지고 수입으로 집계됩니다. 기존 카테고리는 모두 <b>지출</b>로 유지됩니다.</li>
+        <li><b>결제수단 태그(소비 / 저축)</b>는 그 결제수단으로 나간 돈의 성격을 표시합니다. 태그는 합계·차트 계산 규칙을 바꾸지 않습니다 — 수입/지출 집계는 여전히 카테고리 유형이 결정합니다. 기존 결제수단은 모두 <b>소비</b>로 유지됩니다.</li>
+        <li><b>카테고리 매핑</b>을 지정하면 그 결제수단이 선택된 거래에 매핑 카테고리가 자동 배정됩니다. 적용 시점은 ① 거래내역에서 결제수단을 바꿀 때 ② 거래를 수기로 추가할 때 ③ 엑셀·CSV를 업로드할 때입니다. 매핑을 지정하지 않으면 아무 것도 자동으로 바뀌지 않습니다.</li>
+        <li>매핑은 <b>태그별로 따로</b> 보관됩니다. 소비/저축 태그를 바꾸면 그 태그에 저장된 매핑이 적용되며, 반대쪽 매핑 값은 그대로 남아 있습니다.</li>
+        <li>자동 배정은 거래의 기존 카테고리를 덮어씁니다. 단 <b>'{{ REFUND_CATEGORY_LABEL }}' 거래는 제외</b>되며, 이미 저장된 거래의 카테고리는 결제수단을 다시 선택하지 않는 한 바뀌지 않습니다.</li>
         <li>이 페이지에서 변경한 목록은 브라우저(localStorage)에 저장되어 새로고침 후에도 유지됩니다.</li>
       </ul>
     </section>
@@ -798,8 +941,25 @@ const visiblePaymentCount = computed(() => payments.value.filter((p) => !p.hidde
   color: rgb(29 78 216);
   font-weight: 700;
 }
+/* 결제수단 태그 — 소비 / 저축 */
+.type-toggle-btn.is-consume {
+  background: rgb(255 251 235);
+  color: rgb(180 83 9);
+  font-weight: 700;
+}
+.type-toggle-btn.is-savings {
+  background: rgb(240 253 250);
+  color: rgb(15 118 110);
+  font-weight: 700;
+}
 .type-toggle-sm .type-toggle-btn {
   padding: 2px 7px;
   font-size: 11px;
+}
+
+/* 결제수단 → 카테고리 매핑 select */
+.map-select {
+  @apply rounded-md border-slate-300 text-xs py-0.5 pr-7 pl-2 bg-white text-slate-700
+         focus:border-brand-500 focus:ring-brand-500 min-w-[9rem];
 }
 </style>

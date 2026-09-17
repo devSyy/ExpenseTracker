@@ -5,10 +5,13 @@ import {
   DEFAULT_FIXED_CATEGORIES,
   DEFAULT_INCOME_CATEGORIES,
   DEFAULT_PAYMENT_METHODS,
+  DEFAULT_PAYMENT_TAG,
   DEFAULT_TX_TYPE,
+  PAYMENT_TAGS,
   REFUND_CATEGORY,
   type CategoryDef,
   type PaymentDef,
+  type PaymentTag,
   type TxType
 } from '~/utils/types'
 
@@ -48,8 +51,53 @@ function normalizeCategoryDefs(list: CategoryDef[]): CategoryDef[] {
   return changed ? next : list
 }
 
+/** 저장된 값이 무엇이든 유효한 PaymentTag으로 정규화. 미지정 → '소비'(기존 동작 유지) */
+export function normalizePaymentTag(raw: unknown): PaymentTag {
+  return raw === '저축' ? '저축' : DEFAULT_PAYMENT_TAG
+}
+
+/**
+ * 태그별 카테고리 매핑 정규화.
+ * - 알 수 없는 태그 키는 버린다
+ * - 값이 빈 문자열이면 "매핑 없음"이므로 키 자체를 넣지 않는다
+ * - 매핑이 하나도 없으면 undefined를 돌려줘 저장 데이터를 불필요하게 늘리지 않는다
+ */
+export function normalizeCategoryByTag(raw: unknown): Partial<Record<PaymentTag, string>> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const src = raw as Record<string, unknown>
+  const out: Partial<Record<PaymentTag, string>> = {}
+  let count = 0
+  for (const tag of PAYMENT_TAGS) {
+    const v = src[tag]
+    if (typeof v !== 'string') continue
+    const name = v.trim()
+    if (!name) continue
+    out[tag] = name
+    count++
+  }
+  return count > 0 ? out : undefined
+}
+
 function defaultPaymentDefs(): PaymentDef[] {
-  return DEFAULT_PAYMENT_METHODS.map((name) => ({ name, hidden: false }))
+  // 신규 설치의 기본 결제수단은 모두 '소비'이며 카테고리 매핑은 비어 있다
+  // (매핑이 비어 있으면 자동 배정이 일어나지 않으므로 기존 동작과 동일하다).
+  return DEFAULT_PAYMENT_METHODS.map((name) => ({ name, hidden: false, tag: DEFAULT_PAYMENT_TAG }))
+}
+
+/** 모든 결제수단이 유효한 tag/매핑을 갖도록 채운다 (구버전 데이터 마이그레이션). */
+function normalizePaymentDefs(list: PaymentDef[]): PaymentDef[] {
+  let changed = false
+  const next = list.map((p) => {
+    const tag = normalizePaymentTag(p.tag)
+    const categoryByTag = normalizeCategoryByTag(p.categoryByTag)
+    if (p.tag === tag && p.categoryByTag === categoryByTag) return p
+    changed = true
+    const out: PaymentDef = { ...p, tag }
+    if (categoryByTag) out.categoryByTag = categoryByTag
+    else delete out.categoryByTag
+    return out
+  })
+  return changed ? next : list
 }
 
 /** 시스템이 의존하는 필수 카테고리 자동 보강. */
@@ -106,14 +154,25 @@ export const paymentsRepo = createRepository<PaymentDef[]>({
     if (!Array.isArray(raw)) return null
     return raw
       .map((x) => {
-        if (typeof x === 'string') return { name: x.trim(), hidden: false }
+        if (typeof x === 'string') return { name: x.trim(), hidden: false, tag: DEFAULT_PAYMENT_TAG }
         if (x && typeof (x as any).name === 'string') {
-          return { name: String((x as any).name).trim(), hidden: Boolean((x as any).hidden) }
+          // 태그/매핑이 없는 구버전 항목은 '소비' + 매핑 없음으로 이관된다 (데이터 손실 없음)
+          const def: PaymentDef = {
+            name: String((x as any).name).trim(),
+            hidden: Boolean((x as any).hidden),
+            tag: normalizePaymentTag((x as any).tag)
+          }
+          const map = normalizeCategoryByTag((x as any).categoryByTag)
+          if (map) def.categoryByTag = map
+          return def
         }
         return null
       })
       .filter((x): x is PaymentDef => Boolean(x && x.name))
   }
 })
+
+// 로드 직후 태그/매핑 정규화를 한 번 실행한다 (기존 사용자 마이그레이션).
+paymentsRepo.state.value = normalizePaymentDefs(paymentsRepo.state.value)
 
 export { FALLBACK_CATEGORY, FALLBACK_PAYMENT, REFUND_CATEGORY }

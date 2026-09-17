@@ -2,6 +2,7 @@
 // 비영속 상태(필터, 경고, 검출 컬럼 등)만 이 모듈에서 관리한다.
 import { computed, reactive, ref, watch } from 'vue'
 import { classifyCategory, deriveFields } from '~/utils/classify'
+import { computeSavings } from '~/utils/aggregate'
 import { incomeExpenseRepo } from '~/repositories/incomeExpenseRepository'
 import {
   transactionsRepo,
@@ -177,23 +178,41 @@ function countsTowardTotals(t: Transaction): boolean {
  * 필터를 통과한 모든 거래 (지출 계산 제외 항목 **포함**).
  * 거래 내역 테이블처럼 "제외된 거래도 보여야 하는" 화면에서만 사용한다.
  */
+/**
+ * **기간을 제외한** 모든 필터 조건을 한 곳에 모은 판정 함수.
+ *
+ * 기간만 바꿔치기해 "직전 기간"을 뽑으려면 나머지 조건(멤버·숨김 카테고리·카테고리·
+ * 결제수단·구분·검색)이 현재 화면과 정확히 같아야 한다. 조건을 두 군데 적으면
+ * 한쪽만 고쳐져 비교값이 조용히 어긋나므로, 여기 하나만 둔다.
+ */
+function matchesNonPeriodFilters(t: Transaction, hiddenCats: Set<string>, q: string): boolean {
+  const fam = useFamily()
+  // 활성 멤버 필터 (memberId 없으면 primary 소속으로 간주 — 레거시 호환)
+  if (!fam.isMemberActive(t.memberId)) return false
+  if (hiddenCats.has(t.category)) return false
+  if (filters.category !== 'all' && t.category !== filters.category) return false
+  if (filters.payment !== 'all' && t.paymentMethod !== filters.payment) return false
+  if (filters.costType !== 'all' && t.costType !== filters.costType) return false
+  if (q && !(`${t.description} ${t.category} ${t.paymentMethod}`.toLowerCase().includes(q))) return false
+  return true
+}
+
+/** 현재 숨김 카테고리 집합 + 정규화된 검색어 — 필터 판정에 반복해서 필요하다 */
+function filterContext(): { hiddenCats: Set<string>; q: string } {
+  const tax = useTaxonomies()
+  return {
+    hiddenCats: new Set(tax.categories.value.filter((c) => c.hidden).map((c) => c.name)),
+    q: filters.search.trim().toLowerCase()
+  }
+}
+
 const filteredAll = computed<Transaction[]>(() => {
   // 비활성화(숨김) 카테고리 거래는 모든 화면에서 제외
-  const tax = useTaxonomies()
-  const fam = useFamily()
-  const hiddenCats = new Set(tax.categories.value.filter((c) => c.hidden).map((c) => c.name))
-  const q = filters.search.trim().toLowerCase()
+  const { hiddenCats, q } = filterContext()
   return transactions.value.filter((t) => {
-    // 활성 멤버 필터 (memberId 없으면 primary 소속으로 간주 — 레거시 호환)
-    if (!fam.isMemberActive(t.memberId)) return false
-    if (hiddenCats.has(t.category)) return false
     if (filters.year !== 'all' && t.year !== filters.year) return false
     if (filters.month !== 'all' && t.month !== filters.month) return false
-    if (filters.category !== 'all' && t.category !== filters.category) return false
-    if (filters.payment !== 'all' && t.paymentMethod !== filters.payment) return false
-    if (filters.costType !== 'all' && t.costType !== filters.costType) return false
-    if (q && !(`${t.description} ${t.category} ${t.paymentMethod}`.toLowerCase().includes(q))) return false
-    return true
+    return matchesNonPeriodFilters(t, hiddenCats, q)
   })
 })
 
@@ -235,6 +254,34 @@ const expenseTotal = computed<number>(() =>
 /** 순수익 = 수입 − 지출 */
 const netTotal = computed<number>(() => incomeTotal.value - expenseTotal.value)
 
+// ── 저축 ──
+//
+// "저축"의 판정 기준은 **결제수단의 저축 태그** 하나다 (설정 > 결제수단).
+// 카테고리가 아니라 결제수단을 보는 이유: 같은 '입출금' 카테고리라도 어떤 수단으로
+// 옮겼는지에 따라 소비와 저축이 갈리기 때문이다.
+//
+// 주의: 저축 태그 거래도 지출 유형이므로 `filtered`에 그대로 남아 **총 지출에 포함된다.**
+// 총 지출의 정의를 바꾸면 기존 집계·차트가 전부 따라 움직이므로 여기서는 건드리지 않고,
+// 저축 금액을 별도 지표로만 더한다.
+const savingsFiltered = computed<Transaction[]>(() => {
+  const tax = useTaxonomies()
+  return filtered.value.filter((t) => tax.isSavingsPayment(t.paymentMethod))
+})
+
+/** 필터 범위의 저축 합계 */
+const savingsTotal = computed<number>(() =>
+  savingsFiltered.value.reduce((s, t) => s + (Number(t.amount) || 0), 0)
+)
+
+/** 저축 집계 (합계 · 월 환산 · 건수) — computeSavings와 같은 규칙 */
+const savingsSummary = computed(() => computeSavings(filtered.value, useTaxonomies().isSavingsPayment))
+
+/** 저축률 = 저축 ÷ 수입. 수입이 없으면 비율을 낼 수 없으므로 null */
+const savingsRate = computed<number | null>(() => {
+  if (incomeTotal.value <= 0) return null
+  return savingsTotal.value / incomeTotal.value
+})
+
 /** 현재 필터 범위의 환불 거래 수 */
 const refundCount = computed<number>(() => filteredAll.value.reduce((n, t) => n + (isRefund(t) ? 1 : 0), 0))
 
@@ -265,6 +312,182 @@ const excludedCount = computed<number>(() =>
 const excludedAmount = computed<number>(() =>
   filteredAll.value.reduce((s, t) => s + (isUserExcludedExpense(t) ? (Number(t.amount) || 0) : 0), 0)
 )
+
+// ── 기간 비교 (직전 기간 / 전년 동기) ──
+//
+// KPI가 현재 값만 보여주면 "늘었는지 줄었는지"를 알 수 없다. 여기서는 기간 필터만
+// 바꿔치기해 같은 조건의 과거 구간을 뽑아 비교한다. 집계식은 현재 화면과 동일하다
+// (제외 플래그 · 음수 금액 · 수입 카테고리 규칙을 그대로 통과시킨다).
+//
+// 비교 가능 조건:
+//  - 연 + 월이 선택된 경우 → 직전 달, 전년 같은 달
+//  - 연만 선택된 경우      → 직전 해, (전년 동기는 직전 해와 같으므로 생략)
+//  - 연이 '전체'인 경우    → 비교 대상이 정의되지 않으므로 비교 없음
+
+export interface PeriodTotals {
+  /** 사람이 읽는 기간 이름 (2026-09 / 2026년) */
+  label: string
+  /** 지출 합계 */
+  expense: number
+  fixed: number
+  variable: number
+  /** 수입 합계 */
+  income: number
+  /** 저축 합계 — 결제수단에 '저축' 태그가 붙은 거래 */
+  savings: number
+  /** 지출로 집계된 거래 수 */
+  count: number
+}
+
+export interface PeriodComparison {
+  /** 비교 단위 — 비교가 불가능하면 null */
+  unit: 'month' | 'year' | null
+  current: PeriodTotals
+  /** 직전 기간 (지난달 / 지난해) */
+  previous: PeriodTotals | null
+  /** 전년 동월 — 월 단위 비교일 때만 */
+  lastYear: PeriodTotals | null
+}
+
+/** 특정 (연, 월) 구간의 합계를 현재 필터 조건 그대로 계산한다 */
+function totalsFor(year: number, month: number | null, label: string): PeriodTotals {
+  const tax = useTaxonomies()
+  const { hiddenCats, q } = filterContext()
+  const out: PeriodTotals = { label, expense: 0, fixed: 0, variable: 0, income: 0, savings: 0, count: 0 }
+
+  for (const t of transactions.value) {
+    if (t.year !== year) continue
+    if (month !== null && t.month !== month) continue
+    if (!matchesNonPeriodFilters(t, hiddenCats, q)) continue
+
+    const amount = Number(t.amount) || 0
+    const type = tax.categoryType(t.category)
+    if (type === '수입') {
+      // 수입은 excluded가 항상 켜져 있으므로 그 플래그를 보지 않는다 (incomeFiltered와 동일 규칙)
+      if (!isNegativeAmount(t)) out.income += amount
+      continue
+    }
+    if (!countsTowardTotals(t)) continue
+    out.expense += amount
+    out.count += 1
+    if (t.costType === '고정비') out.fixed += amount
+    else out.variable += amount
+    // 저축 태그 결제수단으로 나간 돈 — 지출 합계와 별도로 함께 센다
+    if (tax.isSavingsPayment(t.paymentMethod)) out.savings += amount
+  }
+  return out
+}
+
+/**
+ * 특정 (연, 월)의 수입·지출 요약.
+ *
+ * totalsFor()와 달리 **화면 필터(연/월/카테고리/결제수단/구분/검색)를 보지 않는다.**
+ * 사이드바 '이번 달 요약'처럼 어느 화면에 있든 같은 값을 보여야 하는 곳을 위한 집계다.
+ * 적용하는 규칙은 두 가지뿐이며, 대시보드 KPI와 동일한 판정을 그대로 쓴다.
+ *  - 활성 가족 멤버의 거래만 (isMemberActive)
+ *  - 숨김 카테고리 제외
+ *  - 지출: 제외 플래그·음수 금액을 뺀 '지출' 유형 / 수입: 음수를 뺀 '수입' 유형
+ *
+ * 저장소(transactionsRepo)를 직접 읽으므로 엑셀 업로드·거래 추가/편집/삭제·
+ * 수입/지출 관리의 미러링까지 모든 변경이 자동으로 반영된다(컴포저블 밖에서 계산하지 말 것).
+ */
+export interface MonthSummary {
+  income: number
+  expense: number
+  /** 순수익 = 수입 − 지출 */
+  net: number
+  /** 지출로 집계된 거래 수 */
+  count: number
+}
+
+function monthSummary(year: number, month: number): MonthSummary {
+  const tax = useTaxonomies()
+  const fam = useFamily()
+  const hiddenCats = new Set(tax.categories.value.filter((c) => c.hidden).map((c) => c.name))
+
+  let income = 0
+  let expense = 0
+  let count = 0
+
+  for (const t of transactions.value) {
+    if (t.year !== year || t.month !== month) continue
+    if (!fam.isMemberActive(t.memberId)) continue
+    if (hiddenCats.has(t.category)) continue
+
+    const amount = Number(t.amount) || 0
+    if (tax.categoryType(t.category) === '수입') {
+      if (!isNegativeAmount(t)) income += amount
+      continue
+    }
+    if (!countsTowardTotals(t)) continue
+    expense += amount
+    count += 1
+  }
+
+  return { income, expense, net: income - expense, count }
+}
+
+function monthLabelOf(year: number, month: number): string {
+  return `${year}-${String(month).padStart(2, '0')}`
+}
+
+/** 한 달 앞으로 (1월 → 전년 12월) */
+function shiftMonth(year: number, month: number, by: number): { year: number; month: number } {
+  const zero = year * 12 + (month - 1) + by
+  return { year: Math.floor(zero / 12), month: (zero % 12 + 12) % 12 + 1 }
+}
+
+const periodComparison = computed<PeriodComparison>(() => {
+  const y = filters.year
+  const m = filters.month
+
+  // 연 + 월 → 직전 달 / 전년 동월
+  if (typeof y === 'number' && typeof m === 'number') {
+    const prev = shiftMonth(y, m, -1)
+    const ly = shiftMonth(y, m, -12)
+    return {
+      unit: 'month',
+      current: totalsFor(y, m, monthLabelOf(y, m)),
+      previous: totalsFor(prev.year, prev.month, monthLabelOf(prev.year, prev.month)),
+      lastYear: totalsFor(ly.year, ly.month, monthLabelOf(ly.year, ly.month))
+    }
+  }
+
+  // 연만 → 직전 해
+  if (typeof y === 'number') {
+    return {
+      unit: 'year',
+      current: totalsFor(y, null, `${y}년`),
+      previous: totalsFor(y - 1, null, `${y - 1}년`),
+      lastYear: null
+    }
+  }
+
+  // 전체 기간 — 비교 대상이 없다
+  return {
+    unit: null,
+    current: {
+      label: '전체 기간',
+      expense: expenseTotal.value,
+      fixed: filtered.value.reduce((s, t) => s + (t.costType === '고정비' ? (Number(t.amount) || 0) : 0), 0),
+      variable: filtered.value.reduce((s, t) => s + (t.costType === '변동비' ? (Number(t.amount) || 0) : 0), 0),
+      income: incomeTotal.value,
+      savings: savingsTotal.value,
+      count: filtered.value.length
+    },
+    previous: null,
+    lastYear: null
+  }
+})
+
+/**
+ * 증감률(%) — 기준값이 0이면 비율을 낼 수 없으므로 null.
+ * (0 → 100,000원을 "+∞%"나 "+100%"로 적으면 거짓말이 된다)
+ */
+export function changeRate(current: number, base: number): number | null {
+  if (!Number.isFinite(current) || !Number.isFinite(base) || base === 0) return null
+  return ((current - base) / Math.abs(base)) * 100
+}
 
 const availableYears = computed<number[]>(() => {
   const s = new Set<number>()
@@ -368,6 +591,99 @@ function updateByDescription(description: string, patch: EditablePatch): number 
   })
   if (count > 0) transactions.value = next
   return count
+}
+
+// ── 결제수단 → 카테고리 자동 배정 ──
+//
+// 결제수단은 설정 화면에서 소비/저축 태그를 갖고, 태그별로 카테고리를 매핑할 수 있다.
+// 그 매핑이 있는 결제수단이 거래에 선택되면 카테고리를 함께 맞춰준다.
+//
+// 규칙은 아래 두 함수에만 있다 (적용 경로가 늘어도 규칙은 한 곳이다):
+//  - 매핑이 없는 결제수단은 아무 일도 하지 않는다 → 매핑을 쓰지 않는 사용자는 기존 동작 그대로다.
+//  - 매핑이 있으면 현재 카테고리를 덮어쓴다. 단 **'환불' 거래는 건드리지 않는다** —
+//    환불 카테고리는 음수 결제 취소 짝 매칭의 결과이므로 결제수단 때문에 바뀌면 안 된다.
+
+/** 결제수단에 매핑된 카테고리 (없으면 undefined) — 판정은 useTaxonomies에 위임 */
+function mappedCategoryOf(paymentMethod: PaymentMethod): Category | undefined {
+  const name = (paymentMethod ?? '').trim()
+  if (!name) return undefined
+  return useTaxonomies().paymentMappedCategory(name)
+}
+
+/** 이 거래의 카테고리를 매핑으로 덮어써도 되는지 */
+function mappingAppliesTo(t: Pick<Transaction, 'category'>): boolean {
+  return t.category !== REFUND_CATEGORY
+}
+
+/**
+ * 결제수단 매핑을 적용한 거래를 돌려준다. 바꿀 것이 없으면 **원본 객체 그대로** 반환한다
+ * (참조가 유지되므로 불필요한 재렌더·변경 감지가 생기지 않는다).
+ */
+function withMappedCategory<T extends Transaction>(t: T): T {
+  if (!mappingAppliesTo(t)) return t
+  const mapped = mappedCategoryOf(t.paymentMethod)
+  if (!mapped || mapped === t.category) return t
+  return { ...t, category: mapped }
+}
+
+/**
+ * 거래 목록 전체에 결제수단 매핑을 적용한다 (엑셀 업로드 결과처럼 일괄 처리용).
+ * 바뀐 것이 없으면 입력 배열을 그대로 돌려준다.
+ */
+export function applyPaymentMappings<T extends Transaction>(txs: T[]): T[] {
+  if (!Array.isArray(txs) || txs.length === 0) return txs
+  let changed = 0
+  const next = txs.map((t) => {
+    const m = withMappedCategory(t)
+    if (m !== t) changed++
+    return m
+  })
+  return changed > 0 ? next : txs
+}
+
+export interface PaymentUpdateResult {
+  ok: boolean
+  paymentMethod?: PaymentMethod
+  /** 매핑에 의해 함께 바뀐 카테고리 (바뀌지 않았으면 undefined) */
+  category?: Category
+  reason?: string
+}
+
+/**
+ * 한 거래의 결제수단을 변경한다. 그 결제수단에 카테고리 매핑이 있으면 카테고리도 함께 맞춘다.
+ *
+ * 항상 **단건 전용**이다 — 해당 인덱스 1개만 교체하므로 내용·결제수단이 같은 다른 거래는
+ * 구조적으로 영향받을 수 없다. 실패 시 상태를 원복한다.
+ */
+function updatePaymentMethod(id: string, paymentMethod: PaymentMethod): PaymentUpdateResult {
+  const idx = transactions.value.findIndex((t) => t.id === id)
+  if (idx === -1) return { ok: false, reason: '거래를 찾을 수 없습니다. 목록을 새로고침해 주세요.' }
+
+  const name = (paymentMethod ?? '').trim()
+  if (!name) return { ok: false, reason: '결제수단 값이 비어 있습니다.' }
+
+  const current = transactions.value[idx]!
+  const mapped = mappingAppliesTo(current) ? mappedCategoryOf(name) : undefined
+  const nextCategory = mapped && mapped !== current.category ? mapped : undefined
+
+  if (current.paymentMethod === name && !nextCategory) {
+    return { ok: true, paymentMethod: name }
+  }
+
+  const snapshot = transactions.value
+  try {
+    const arr = snapshot.slice()
+    arr[idx] = {
+      ...current,
+      paymentMethod: name,
+      ...(nextCategory ? { category: nextCategory } : {})
+    }
+    transactions.value = arr
+    return { ok: true, paymentMethod: name, category: nextCategory }
+  } catch (e) {
+    transactions.value = snapshot // 롤백
+    return { ok: false, reason: (e as Error).message }
+  }
 }
 
 // ── 지출 계산 제외 플래그 ──
@@ -635,8 +951,9 @@ function addTransaction(input: NewTransactionInput): Transaction | null {
   if (!Number.isFinite(amt) || amt <= 0) return null
 
   const description = (input.description ?? '').trim() || '(내용 없음)'
-  const category = (input.category ?? '기타').trim() || '기타'
   const paymentMethod = (input.paymentMethod ?? '기타결제').trim() || '기타결제'
+  // 카테고리를 지정하지 않았다면 결제수단 매핑을 먼저 본다 (매핑이 없으면 종전처럼 '기타').
+  const category = (input.category ?? '').trim() || mappedCategoryOf(paymentMethod) || '기타'
   const costType: CostType = input.costType === '고정비' ? '고정비' : '변동비'
 
   const id = `manual-${d.getTime()}-${Math.random().toString(36).slice(2, 8)}`
@@ -853,6 +1170,10 @@ export function useExpenses() {
     incomeTotal,
     expenseTotal,
     netTotal,
+    savingsFiltered,
+    savingsTotal,
+    savingsSummary,
+    savingsRate,
     excludedCount,
     excludedAmount,
     isExcluded,
@@ -873,6 +1194,9 @@ export function useExpenses() {
     lastSavedAt,
     unsavedChanges,
     filters,
+    periodComparison,
+    monthSummary,
+    changeRate,
     availableYears,
     availableMonths,
     hasPeriodFilter,
@@ -882,6 +1206,9 @@ export function useExpenses() {
     reset,
     updateTransaction,
     updateByDescription,
+    updatePaymentMethod,
+    mappedCategoryOf,
+    applyPaymentMappings,
     isRelated,
     relatedTransactions,
     countRelated,

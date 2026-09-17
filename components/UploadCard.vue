@@ -7,14 +7,37 @@
 //  - 2명 이상이면 탭으로 대상 멤버를 고른다. 업로드 데이터는 "대상 멤버 1명"에게만 저장되며,
 //    선택된 여러 멤버는 대시보드에서 합산 조회될 뿐 데이터가 복제되지 않는다.
 //  - 멤버별 임시 업로드 상태는 서로 독립이며, 대상 탭을 바꿔도 유실되지 않는다.
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useFamily } from '~/composables/useFamily'
 import { useMemberUploads } from '~/composables/useMemberUploads'
+import { useTaxonomies } from '~/composables/useTaxonomies'
+import { downloadSampleTemplate } from '~/utils/sampleTemplate'
 
 const { activeMembers, hasActiveMember, uploadTargetMemberId, setUploadTarget } = useFamily()
 const { uploadOf, ACCEPT_ATTR } = useMemberUploads()
+const { visibleCategoryNames, visiblePaymentNames } = useTaxonomies()
 
 const showTabs = computed(() => activeMembers.value.length > 1)
+
+// 샘플 양식(.xlsx) 다운로드 — 등록된 카테고리/결제수단을 예시 값으로 채운다.
+const sampleBusy = ref(false)
+const sampleError = ref('')
+
+async function onDownloadSample() {
+  if (sampleBusy.value) return
+  sampleBusy.value = true
+  sampleError.value = ''
+  try {
+    await downloadSampleTemplate({
+      categories: visibleCategoryNames.value,
+      payments: visiblePaymentNames.value
+    })
+  } catch (e) {
+    sampleError.value = `샘플 양식을 만들지 못했습니다: ${(e as Error).message}`
+  } finally {
+    sampleBusy.value = false
+  }
+}
 
 /** 탭에 표시할 배지: 저장 대기 중인 임시 업로드가 있으면 표시 */
 function badgeOf(memberId: string): string {
@@ -36,34 +59,52 @@ function badgeOf(memberId: string): string {
         </p>
       </div>
 
-      <!-- 대상 멤버 탭 (활성 멤버 2명 이상일 때만) -->
-      <div v-if="showTabs" class="flex items-center gap-1 flex-wrap">
-        <span class="text-[11px] text-slate-400 mr-1">저장 대상</span>
+      <div class="flex items-center gap-2 flex-wrap justify-end">
+        <!-- 샘플 양식 다운로드 -->
         <button
-          v-for="m in activeMembers"
-          :key="m.id"
           type="button"
-          :class="[
-            'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border transition',
-            uploadTargetMemberId === m.id
-              ? 'bg-brand-50 border-brand-300 text-brand-700'
-              : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50'
-          ]"
-          :title="`${m.name} 의 가계부로 저장`"
-          @click="setUploadTarget(m.id)"
+          class="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white text-xs font-medium text-slate-600 hover:bg-slate-50 hover:text-brand-700 hover:border-brand-300 transition disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+          :disabled="sampleBusy"
+          title="업로드 형식에 맞춘 예시 엑셀 파일을 내려받습니다."
+          @click="onDownloadSample"
         >
-          <span
-            class="w-4 h-4 rounded-full grid place-items-center text-[9px] text-white"
-            :style="{ background: m.color }"
-          >{{ m.emoji || '👤' }}</span>
-          <span>{{ m.name }}</span>
-          <span
-            v-if="badgeOf(m.id)"
-            :class="['text-[9px]', badgeOf(m.id) === '!' ? 'text-red-500' : 'text-emerald-500']"
-          >{{ badgeOf(m.id) }}</span>
+          <span aria-hidden="true">⬇</span>
+          <span>{{ sampleBusy ? '만드는 중...' : '샘플 양식(.xlsx) 다운로드' }}</span>
         </button>
+
+        <!-- 대상 멤버 탭 (활성 멤버 2명 이상일 때만) -->
+        <div v-if="showTabs" class="flex items-center gap-1 flex-wrap">
+          <span class="text-[11px] text-slate-400 mr-1">저장 대상</span>
+          <button
+            v-for="m in activeMembers"
+            :key="m.id"
+            type="button"
+            :class="[
+              'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border transition',
+              uploadTargetMemberId === m.id
+                ? 'bg-brand-50 border-brand-300 text-brand-700'
+                : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50'
+            ]"
+            :title="`${m.name} 의 가계부로 저장`"
+            @click="setUploadTarget(m.id)"
+          >
+            <span
+              class="w-4 h-4 rounded-full grid place-items-center text-[9px] text-white"
+              :style="{ background: m.color }"
+            >{{ m.emoji || '👤' }}</span>
+            <span>{{ m.name }}</span>
+            <span
+              v-if="badgeOf(m.id)"
+              :class="['text-[9px]', badgeOf(m.id) === '!' ? 'text-red-500' : 'text-emerald-500']"
+            >{{ badgeOf(m.id) }}</span>
+          </button>
+        </div>
       </div>
     </div>
+
+    <p v-if="sampleError" class="mb-3 text-sm rounded-md bg-red-50 text-red-700 px-3 py-2">
+      {{ sampleError }}
+    </p>
 
     <!-- 활성 멤버 없음 → 업로드 비활성화 -->
     <template v-if="!hasActiveMember">

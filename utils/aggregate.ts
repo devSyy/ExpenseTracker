@@ -105,6 +105,43 @@ export function summarizeFixedVariable(tx: Transaction[]): FixedVariableSummary 
   }
 }
 
+/**
+ * 저축 집계 — **결제수단에 '저축' 태그가 붙은 거래**의 합계.
+ *
+ * 태그 판정을 인자로 받는 이유: 이 모듈은 순수 집계만 담당하고 분류 상태(useTaxonomies)에
+ * 의존하지 않는다. parseExcel이 isExpenseCategory를 주입받는 것과 같은 방식이다.
+ */
+export interface SavingsSummary {
+  /** 필터 범위 전체의 저축 합계 */
+  total: number
+  /** 월 환산 — 합계 ÷ 데이터가 있는 개월 수. 한 달만 선택했다면 그 달의 합계와 같다 */
+  monthly: number
+  /** 저축으로 집계된 거래 수 */
+  count: number
+  /** 집계에 포함된 개월 수 */
+  months: number
+}
+
+export function computeSavings(
+  tx: Transaction[],
+  isSavingsPayment: (paymentMethod: PaymentMethod) => boolean
+): SavingsSummary {
+  let total = 0
+  let count = 0
+  const monthsWithSavings = new Set<string>()
+  for (const t of tx) {
+    if (!isSavingsPayment(t.paymentMethod)) continue
+    total += Number(t.amount) || 0
+    count += 1
+    monthsWithSavings.add(t.monthLabel)
+  }
+  // 월 환산의 분모는 **전체 필터 범위의 개월 수**다.
+  // 저축이 있었던 달만 세면 "한 달만 저축해도 월 저축액이 그 금액"이 되어 과대평가된다.
+  const allMonths = new Set(tx.map((t) => t.monthLabel))
+  const months = allMonths.size || 1
+  return { total, monthly: total / months, count, months: allMonths.size }
+}
+
 export interface KPISummary {
   total: number
   count: number

@@ -3,11 +3,16 @@
 // 데스크톱에서는 사용자가 사이드바를 아이콘 전용 모드로 접을 수 있다(상태 localStorage 보존).
 // 좁은 데스크톱(< xl 1280px)에서는 처음 진입 시 자동으로 콤팩트 모드로 시작해
 // 본문 공간을 우선 확보한다.
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useIncomeExpense } from '~/composables/useIncomeExpense'
+import { useExpenses } from '~/composables/useExpenses'
 import { useFamily } from '~/composables/useFamily'
 
-const { monthlyStats } = useIncomeExpense()
+// 수입/지출 관리 ↔ 대시보드 미러링 감시자는 useIncomeExpense 모듈을 불러오는 시점에 등록된다.
+// 어느 페이지로 진입하든 미러링이 살아 있도록 레이아웃에서 한 번 호출해 둔다.
+useIncomeExpense()
+
+const { monthSummary } = useExpenses()
 const {
   familyName,
   members,
@@ -19,13 +24,43 @@ const {
 } = useFamily()
 
 // ── 이번 달 요약 ──
-const now = new Date()
-const ymNow = now.toISOString().slice(0, 7)
-const stats = computed(() => monthlyStats(ymNow))
+//
+// 집계는 useExpenses().monthSummary() 한 곳에서만 한다. 저장소(거래 목록)를 직접 읽으므로
+// 엑셀 업로드·거래 추가/편집/삭제·수입/지출 관리의 미러링까지 모든 변경이 자동 반영된다.
+// (수입/지출 관리에서 '사용내역 가져오기'로 들어온 항목은 원본이 이미 거래 목록에 있어
+//  대시보드 쪽만 세면 중복 없이 전체가 된다.)
+//
+// 기준 시각은 ref로 들고 간다 — SPA라 탭을 오래 열어둬도 자정·월이 바뀌면 요약이 따라가야 한다.
+// 또한 toISOString()은 UTC라 KST에서는 매월 1일 오전 9시 이전이 지난달로 잡히므로 로컬 기준으로 만든다.
+const nowRef = ref(new Date())
+let monthTimer: number | undefined
+
+function refreshNow() {
+  nowRef.value = new Date()
+}
+
+onMounted(() => {
+  monthTimer = window.setInterval(refreshNow, 60_000)
+  window.addEventListener('focus', refreshNow)
+  document.addEventListener('visibilitychange', refreshNow)
+})
+
+onBeforeUnmount(() => {
+  if (monthTimer) window.clearInterval(monthTimer)
+  monthTimer = undefined
+  window.removeEventListener('focus', refreshNow)
+  document.removeEventListener('visibilitychange', refreshNow)
+})
+
+/** 이번 달 — 값이 원시형이라 실제로 달이 바뀔 때만 아래 계산이 다시 돈다 */
+const currentYear = computed(() => nowRef.value.getFullYear())
+const currentMonth = computed(() => nowRef.value.getMonth() + 1)
+
+const stats = computed(() => monthSummary(currentYear.value, currentMonth.value))
 
 const monthRangeLabel = computed(() => {
-  const y = now.getFullYear()
-  const m = now.getMonth() + 1
+  const y = currentYear.value
+  const m = currentMonth.value
   const lastDay = new Date(y, m, 0).getDate()
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${y}.${pad(m)}.01 ~ ${y}.${pad(m)}.${pad(lastDay)}`
@@ -211,6 +246,18 @@ const navSub = 'block px-3 py-1.5 rounded-md text-xs text-slate-500 hover:text-s
             <NuxtLink to="/savings" :class="navSub" active-class="bg-brand-50 text-brand-700 font-semibold">예금/적금</NuxtLink>
             <NuxtLink to="/loans" :class="navSub" active-class="bg-brand-50 text-brand-700 font-semibold">대출</NuxtLink>
             <NuxtLink to="/cards" :class="navSub" active-class="bg-brand-50 text-brand-700 font-semibold">카드</NuxtLink>
+          </div>
+        </div>
+
+        <!-- 일정 (그룹) — 자산 그룹과 같은 구조/스타일 -->
+        <div class="mt-2">
+          <div class="flex items-center gap-3 px-3 py-2 text-sm text-brand-700 font-semibold" title="일정">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="flex-shrink-0"><rect x="3" y="4" width="18" height="17" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="16" y1="2" x2="16" y2="6"/></svg>
+            <span class="collapsible-text">일정</span>
+          </div>
+          <div class="ml-7 mt-1 space-y-0.5 collapsible-section">
+            <NuxtLink to="/contracts" :class="navSub" active-class="bg-brand-50 text-brand-700 font-semibold">계약 관리</NuxtLink>
+            <NuxtLink to="/anniversaries" :class="navSub" active-class="bg-brand-50 text-brand-700 font-semibold">기념일 관리</NuxtLink>
           </div>
         </div>
 

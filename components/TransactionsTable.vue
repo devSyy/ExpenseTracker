@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // 거래 내역 테이블.
 // 카테고리/결제수단/구분 셀은 모두 인라인 <select>로 즉시 편집 가능하다.
-// 변경 즉시 useExpenses.updateTransaction()을 호출해 전역 상태를 갱신한다.
+// 변경 즉시 useExpenses의 편집 함수를 호출해 전역 상태를 갱신한다.
+// 결제수단에 카테고리 매핑(설정 > 결제수단)이 걸려 있으면 결제수단을 바꿀 때 카테고리도 함께 따라간다.
 import { computed, ref, watch } from 'vue'
 import { useExpenses, type UpdateScope } from '~/composables/useExpenses'
 import { useTaxonomies } from '~/composables/useTaxonomies'
@@ -23,8 +24,9 @@ const {
   setExcluded,
   setExcludedMany,
   removeTransactions,
-  updateTransaction,
   updateByDescription,
+  updatePaymentMethod,
+  mappedCategoryOf,
   countRelated,
   updateCategoryScoped,
   addTransaction,
@@ -342,8 +344,24 @@ watch([page, tableFiltered], () => {
   const p = pendingCategory.value
   if (p && !visible.value.some((t) => t.id === p.id)) cancelCategoryEdit()
 })
+/**
+ * 결제수단 변경.
+ *
+ * 그 결제수단에 카테고리 매핑(설정 > 결제수단)이 걸려 있으면 카테고리도 함께 맞춰진다.
+ * 매핑이 없으면 종전처럼 결제수단만 바뀐다. 환불 거래의 카테고리는 매핑 대상에서 제외된다.
+ */
 function onChangePayment(id: string, value: string) {
-  updateTransaction(id, { paymentMethod: value })
+  const r = updatePaymentMethod(id, value)
+  if (!r.ok) {
+    selectRev.value++
+    flashMsg(`결제수단 변경 실패: ${r.reason ?? '알 수 없는 오류'}`, 'err')
+    return
+  }
+  if (r.category) {
+    // 카테고리 select의 DOM 값을 새 카테고리와 다시 맞춘다
+    selectRev.value++
+    flashMsg(`결제수단 '${value}' 매핑 적용 · 카테고리 → ${r.category}`)
+  }
 }
 function onChangeCostType(id: string, value: string) {
   if (value !== '고정비' && value !== '변동비') return
@@ -476,7 +494,12 @@ const addError = ref<string>('')
 
 function toggleAddForm() {
   showAddForm.value = !showAddForm.value
-  if (showAddForm.value) draft.value = emptyDraft()
+  if (showAddForm.value) {
+    const d = emptyDraft()
+    // 기본 결제수단에 매핑이 있으면 카테고리도 그 값으로 열어준다
+    d.category = mappedCategoryOf(d.paymentMethod) ?? d.category
+    draft.value = d
+  }
   addError.value = ''
 }
 
@@ -500,6 +523,19 @@ function onSubmitAdd() {
   draft.value = emptyDraft()
   showAddForm.value = false
 }
+
+/**
+ * 수기 추가 폼에서 결제수단을 고르면, 그 결제수단에 매핑된 카테고리를 자동으로 채운다.
+ * 사용자가 그 뒤에 카테고리를 직접 바꾸면 그 선택이 유지된다(다시 덮어쓰지 않는다).
+ */
+watch(() => draft.value.paymentMethod, (pm) => {
+  if (!showAddForm.value) return
+  const mapped = mappedCategoryOf(pm)
+  if (mapped && mapped !== draft.value.category) draft.value.category = mapped
+})
+
+/** 현재 draft의 결제수단에 걸린 매핑 카테고리 (폼 안내 문구용) */
+const draftMappedCategory = computed<string | undefined>(() => mappedCategoryOf(draft.value.paymentMethod))
 
 // 폼 옵션: visible 목록 + 현재 draft 값이 숨김/외부면 임시 노출
 const draftCategoryOptions = computed<string[]>(() => {
@@ -718,6 +754,9 @@ const txCount = computed(() => transactions.value.length)
         </div>
       </div>
       <div v-if="addError" class="mt-2 text-xs text-rose-600">{{ addError }}</div>
+      <div v-if="draftMappedCategory" class="mt-2 text-[11px] text-brand-600">
+        '{{ draft.paymentMethod }}'에 매핑된 카테고리 <b>{{ draftMappedCategory }}</b>가 자동 선택되었습니다 — 필요하면 직접 바꿀 수 있습니다.
+      </div>
       <div class="mt-2 text-[11px] text-slate-400">
         추가만으로는 메모리에만 반영됩니다. 다음 방문에도 유지하려면 위 <b>저장하기</b>를 누르세요.
       </div>

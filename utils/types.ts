@@ -93,10 +93,35 @@ export interface CategoryDef {
   type?: TxType
 }
 
-/** 결제수단 정의 — 이름 + 표시 여부 */
+/**
+ * 결제수단 태그 — 이 결제수단으로 나간 돈의 성격.
+ * '소비'는 실제로 쓴 돈, '저축'은 자산으로 옮긴 돈이다.
+ *
+ * 태그 자체는 수입/지출 집계 규칙을 바꾸지 않는다(집계는 여전히 카테고리 유형이 결정한다).
+ * 태그가 하는 일은 **어느 카테고리 매핑을 적용할지** 고르는 것뿐이다.
+ */
+export type PaymentTag = '소비' | '저축'
+
+export const PAYMENT_TAGS = ['소비', '저축'] as const
+
+/** 태그가 지정되지 않은 결제수단의 기본값 (구버전 데이터 호환 — 기존 동작 유지) */
+export const DEFAULT_PAYMENT_TAG: PaymentTag = '소비'
+
+/** 결제수단 정의 — 이름 + 표시 여부 + 소비/저축 태그 + 태그별 카테고리 매핑 */
 export interface PaymentDef {
   name: string
   hidden?: boolean
+  /**
+   * 소비/저축 태그. 값이 없으면(구버전 저장 데이터) '소비'로 간주한다.
+   * 리포지토리 로드 시 항상 채워지므로 런타임에서는 사실상 필수다.
+   */
+  tag?: PaymentTag
+  /**
+   * **태그별 카테고리 매핑.** 이 결제수단이 선택되면 현재 태그에 매핑된 카테고리가
+   * 거래에 자동 배정된다. 매핑이 없는 태그는 키 자체가 없으며, 그때는 자동 배정이
+   * 일어나지 않는다(기존 동작 그대로).
+   */
+  categoryByTag?: Partial<Record<PaymentTag, string>>
 }
 
 // ── 하위 호환 alias ──
