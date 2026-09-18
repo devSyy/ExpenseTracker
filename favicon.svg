@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- 앱 아이덴티티 마크 (components/AppLogo.vue 와 동일 형태) -->
+  <rect width="32" height="32" rx="7" fill="#2563eb"/>
+  <g transform="translate(4 4) scale(1)">
+    <path fill="#fff" fill-rule="evenodd" d="
+      M12 2 L23 9.6 L20.8 9.6 L12 3.5 L3.2 9.6 L1 9.6 Z
+      M3.6 10.8 H20.4 V21.6 H3.6 Z
+      M6.6 16 h3 v3.4 h-3 Z
+      M10.5 14.2 h3 v5.2 h-3 Z
+      M14.4 12.4 h3 v7 h-3 Z
+    "/>
+  </g>
+</svg>
