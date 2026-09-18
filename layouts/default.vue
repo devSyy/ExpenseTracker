@@ -3,7 +3,7 @@
 // 데스크톱에서는 사용자가 사이드바를 아이콘 전용 모드로 접을 수 있다(상태 localStorage 보존).
 // 좁은 데스크톱(< xl 1280px)에서는 처음 진입 시 자동으로 콤팩트 모드로 시작해
 // 본문 공간을 우선 확보한다.
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useIncomeExpense } from '~/composables/useIncomeExpense'
 import { useExpenses } from '~/composables/useExpenses'
 import { useFamily } from '~/composables/useFamily'
@@ -15,6 +15,7 @@ useIncomeExpense()
 const { monthSummary } = useExpenses()
 const {
   familyName,
+  setFamilyName,
   members,
   primaryMemberId,
   isActive,
@@ -22,6 +23,31 @@ const {
   setPrimary,
   activateAll
 } = useFamily()
+
+// ── 가족 이름 인라인 편집 ──
+// 사이드바 이름을 눌러 바로 고칠 수 있다. 저장은 useFamily().setFamilyName() 한 곳으로만 간다
+// (가족 관리 화면의 편집과 동일한 경로 — 빈 값이면 기본 이름으로 되돌아간다).
+const editingName = ref(false)
+const nameDraft = ref('')
+const nameInput = ref<HTMLInputElement | null>(null)
+
+async function startEditName() {
+  nameDraft.value = familyName.value
+  editingName.value = true
+  await nextTick()
+  nameInput.value?.select()
+}
+
+function commitName() {
+  if (!editingName.value) return
+  editingName.value = false
+  const next = nameDraft.value.trim()
+  if (next && next !== familyName.value) setFamilyName(next)
+}
+
+function cancelName() {
+  editingName.value = false
+}
 
 // ── 이번 달 요약 ──
 //
@@ -129,9 +155,36 @@ const navSub = 'block px-3 py-1.5 rounded-md text-xs text-slate-500 hover:text-s
         <div class="w-9 h-9 flex-shrink-0 rounded-xl bg-brand-600 text-white grid place-items-center">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/></svg>
         </div>
-        <div class="leading-tight collapsible-text">
+        <div class="leading-tight collapsible-text min-w-0">
           <div class="text-[10px] font-medium text-slate-400 tracking-wide">FAMILY</div>
-          <div class="text-base font-bold text-slate-900 truncate">{{ familyName }}</div>
+          <!-- 이름을 눌러 바로 수정 (Enter 저장 · Esc 취소 · 포커스가 빠져도 저장) -->
+          <input
+            v-if="editingName"
+            ref="nameInput"
+            v-model="nameDraft"
+            type="text"
+            maxlength="20"
+            class="w-full text-base font-bold text-slate-900 bg-white border border-brand-300 rounded-md px-1.5 py-0.5 focus:outline-none focus:ring-2 focus:ring-brand-200"
+            placeholder="우리 가족"
+            aria-label="가족 이름"
+            @keydown.enter.prevent="commitName"
+            @keydown.esc.prevent="cancelName"
+            @blur="commitName"
+          />
+          <button
+            v-else
+            type="button"
+            class="group flex items-center gap-1 max-w-full text-base font-bold text-slate-900 rounded-md px-1 -mx-1 hover:bg-slate-100 transition-colors"
+            title="가족 이름 수정"
+            @click="startEditName"
+          >
+            <span class="truncate">{{ familyName }}</span>
+            <svg
+              class="w-3 h-3 flex-shrink-0 text-slate-300 group-hover:text-brand-600 transition-colors"
+              viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
+            ><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+          </button>
         </div>
         <!-- 데스크톱 접기/펼치기 토글 -->
         <button

@@ -102,6 +102,18 @@ function badgeOf(memberId: string): string {
       </div>
     </div>
 
+    <!-- 뱅크샐러드 안내 — 업로드 영역 바로 위, 놓치지 않도록 강조 -->
+    <div class="mb-4 flex items-start gap-2.5 rounded-xl border border-brand-200 bg-brand-50 px-3.5 py-3">
+      <span class="text-lg leading-none mt-0.5" aria-hidden="true">💡</span>
+      <p class="text-sm text-brand-800 leading-relaxed">
+        <b class="font-semibold">뱅크샐러드</b> 앱에서 내보낸 <b class="font-semibold">입출금(가계부) 내역 엑셀</b>은
+        변환 없이 그대로 올리면 됩니다.
+        <span class="text-brand-700/80">
+          날짜·내용·금액·대분류·결제수단 열을 자동으로 인식하고, 제목 행이나 시트가 여러 개여도 실제 내역 시트를 찾아 읽습니다.
+        </span>
+      </p>
+    </div>
+
     <p v-if="sampleError" class="mb-3 text-sm rounded-md bg-red-50 text-red-700 px-3 py-2">
       {{ sampleError }}
     </p>

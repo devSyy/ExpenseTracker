@@ -3,6 +3,7 @@
 import { computed, ref } from 'vue'
 import { Doughnut, Line } from 'vue-chartjs'
 import { useAssets, ASSET_CATEGORIES } from '~/composables/useAssets'
+import { withBackupHint } from '~/utils/backupHint'
 
 useHead({ title: '자산 현황 · 가계부' })
 
@@ -25,7 +26,7 @@ let toastTimer: number | undefined
 function notify(kind: 'ok' | 'err', text: string) {
   toast.value = { kind, text }
   if (toastTimer) window.clearTimeout(toastTimer)
-  toastTimer = window.setTimeout(() => (toast.value = null), 2400) as unknown as number
+  toastTimer = window.setTimeout(() => (toast.value = null), 3600) as unknown as number
 }
 
 // ── 카테고리 인라인 편집 ──
@@ -45,7 +46,7 @@ function commitEditEntry() {
   if (!Number.isFinite(amt) || amt < 0) { notify('err', '금액은 0 이상이어야 합니다'); return }
   setEntry(editingKey.value, amt, editNote.value)
   editingKey.value = null
-  notify('ok', '저장되었습니다')
+  notify('ok', withBackupHint('저장되었습니다'))
 }
 function cancelEditEntry() {
   editingKey.value = null
@@ -59,7 +60,7 @@ const editingRemarkText = ref<string>('')
 function onAddRemark() {
   if (addRemark(newRemark.value)) {
     newRemark.value = ''
-    notify('ok', '비고가 추가되었습니다')
+    notify('ok', withBackupHint('비고가 추가되었습니다'))
   } else {
     notify('err', '내용을 입력하세요')
   }
@@ -78,7 +79,7 @@ function cancelEditRemark() { editingRemarkIdx.value = null }
 // ── 스냅샷 추가 ──
 function onSnapshot() {
   snapshotCurrent()
-  notify('ok', '현재 상태를 변동 추이에 기록했습니다')
+  notify('ok', withBackupHint('현재 상태를 변동 추이에 기록했습니다'))
 }
 
 // ── 포맷터 ──
@@ -286,7 +287,7 @@ function colorClass(key: string): string {
       <div
         v-if="toast"
         :class="[
-          'fixed top-6 right-6 z-50 px-4 py-2 rounded-lg shadow text-sm',
+          'fixed top-6 right-6 z-50 px-4 py-2 rounded-lg shadow text-sm whitespace-pre-line max-w-sm leading-relaxed',
           toast.kind === 'ok' ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white'
         ]"
       >{{ toast.text }}</div>

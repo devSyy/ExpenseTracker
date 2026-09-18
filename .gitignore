@@ -19,3 +19,7 @@ pnpm-debug.log*
 .env
 .env.*
 !.env.example
+
+# 작업 중 생성되는 검증 스크린샷 등 (git add -A 에 휩쓸리지 않게)
+# 이미 추적 중인 파일은 영향받지 않는다 — 지우려면 git rm -r --cached "Claude outputs"
+Claude outputs/

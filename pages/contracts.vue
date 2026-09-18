@@ -11,6 +11,7 @@ import {
 } from '~/composables/useContracts'
 import { formatKRW } from '~/utils/format'
 import { describeDays, formatDDay, formatYmdLong } from '~/utils/schedule'
+import { withBackupHint } from '~/utils/backupHint'
 
 useHead({ title: '계약 관리 · 가계부 대시보드' })
 
@@ -32,7 +33,7 @@ let toastTimer: number | undefined
 function notify(kind: 'ok' | 'err', text: string) {
   toast.value = { kind, text }
   if (toastTimer) window.clearTimeout(toastTimer)
-  toastTimer = window.setTimeout(() => (toast.value = null), 2400) as unknown as number
+  toastTimer = window.setTimeout(() => (toast.value = null), 3600) as unknown as number
 }
 
 // ── 필터 ──
@@ -133,7 +134,7 @@ function onSubmit() {
     formError.value = r.reason ?? '저장에 실패했습니다'
     return
   }
-  notify('ok', editingId.value ? '계약이 수정되었습니다' : '계약이 추가되었습니다')
+  notify('ok', withBackupHint(editingId.value ? '계약이 수정되었습니다' : '계약이 추가되었습니다'))
   closeForm()
 }
 
@@ -142,7 +143,7 @@ function onRemove(v: ContractView) {
   const r = removeContract(v.contract.id)
   if (!r.ok) return notify('err', r.reason ?? '삭제에 실패했습니다')
   if (editingId.value === v.contract.id) closeForm()
-  notify('ok', '삭제되었습니다')
+  notify('ok', withBackupHint('삭제되었습니다'))
 }
 
 function onToggleTerminated(v: ContractView) {
@@ -150,7 +151,7 @@ function onToggleTerminated(v: ContractView) {
   if (next && !window.confirm(`'${v.contract.title}' 계약을 해지 처리할까요?`)) return
   const r = setTerminated(v.contract.id, next)
   if (!r.ok) return notify('err', r.reason ?? '처리에 실패했습니다')
-  notify('ok', next ? '해지 처리되었습니다' : '해지를 취소했습니다')
+  notify('ok', withBackupHint(next ? '해지 처리되었습니다' : '해지를 취소했습니다'))
 }
 
 // ── 표시 도우미 ──
@@ -197,7 +198,7 @@ function endLabel(v: ContractView): string {
       <div
         v-if="toast"
         :class="[
-          'fixed top-6 right-6 z-50 px-4 py-2 rounded-lg shadow text-sm',
+          'fixed top-6 right-6 z-50 px-4 py-2 rounded-lg shadow text-sm whitespace-pre-line max-w-sm leading-relaxed',
           toast.kind === 'ok' ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white'
         ]"
       >{{ toast.text }}</div>

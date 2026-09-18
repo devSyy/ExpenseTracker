@@ -7,7 +7,27 @@ import { computed, ref, watch } from 'vue'
 import { useExpenses, type UpdateScope } from '~/composables/useExpenses'
 import { useTaxonomies } from '~/composables/useTaxonomies'
 import { formatDate, formatKRW } from '~/utils/format'
+import { downloadTransactionsXlsx } from '~/utils/exportTransactions'
 import type { CostType, Transaction } from '~/utils/types'
+import { withBackupHint } from '~/utils/backupHint'
+import {
+  TX_COLUMNS,
+  HIDEABLE_COLUMN_KEYS,
+  ALL_COLUMN_KEYS,
+  STATUS_FILTERS,
+  compareBy,
+  duplicateKey,
+  duplicateCounts,
+  tableMinWidth,
+  parseAmountInput,
+  inAmountRange,
+  inDateRange,
+  type SortKey,
+  type SortDir,
+  type ColumnKey,
+  type StatusFilter
+} from '~/utils/txTable'
+import { txTableViewRepo } from '~/repositories'
 
 const {
   filtered,
@@ -102,10 +122,118 @@ const searchFiltered = computed<Transaction[]>(() =>
   searchTokens.value.length === 0 ? chipFiltered.value : chipFiltered.value.filter(matchesSearch)
 )
 
+// ── 고급 필터 ──
+//
+// 검색창은 문자열 부분일치라 "10만원 이상", "9월 첫 주", "환불만" 같은 조건을 낼 수 없다.
+// 여기서 금액 범위 · 날짜 범위 · 결제수단 다중 선택 · 상태를 따로 건다.
+// 판정식은 utils/txTable.ts의 순수 함수를 쓰고, 이 블록은 입력값만 들고 있는다.
+const showAdvanced = ref(false)
+const advAmountMin = ref<string>('')
+const advAmountMax = ref<string>('')
+const advDateFrom = ref<string>('')
+const advDateTo = ref<string>('')
+const advPayments = ref<Set<string>>(new Set())
+const advStatus = ref<StatusFilter>('all')
+
+const advAmountMinNum = computed(() => parseAmountInput(advAmountMin.value))
+const advAmountMaxNum = computed(() => parseAmountInput(advAmountMax.value))
+
+/** 금액 입력이 숫자가 아니거나 min > max 면 안내한다 (조용히 무시하면 필터가 안 먹는 것처럼 보인다) */
+const advAmountError = computed<string>(() => {
+  if (advAmountMin.value.trim() !== '' && advAmountMinNum.value == null) return '최소 금액이 숫자가 아닙니다'
+  if (advAmountMax.value.trim() !== '' && advAmountMaxNum.value == null) return '최대 금액이 숫자가 아닙니다'
+  const lo = advAmountMinNum.value, hi = advAmountMaxNum.value
+  if (lo != null && hi != null && lo > hi) return '최소 금액이 최대 금액보다 큽니다'
+  return ''
+})
+const advDateError = computed<string>(() =>
+  advDateFrom.value && advDateTo.value && advDateFrom.value > advDateTo.value
+    ? '시작일이 종료일보다 늦습니다'
+    : ''
+)
+
+/** 결제수단 칩 — 현재 조회 결과에 실제로 등장한 것만 (빈 항목은 노이즈) */
+const paymentChips = computed<Array<{ name: string; count: number }>>(() => {
+  const counts = new Map<string, number>()
+  for (const t of filteredAll.value) counts.set(t.paymentMethod, (counts.get(t.paymentMethod) ?? 0) + 1)
+  return visiblePaymentNames.value
+    .filter((p) => counts.has(p))
+    .map((p) => ({ name: p, count: counts.get(p) ?? 0 }))
+    .sort((a, b) => b.count - a.count)
+})
+
+function togglePaymentChip(name: string) {
+  const next = new Set(advPayments.value)
+  if (next.has(name)) next.delete(name)
+  else next.add(name)
+  advPayments.value = next
+}
+
+/** 적용 중인 고급 필터 개수 — 접어 뒀을 때도 걸려 있다는 걸 배지로 알린다 */
+const advActiveCount = computed<number>(() => {
+  let n = 0
+  if (advAmountMinNum.value != null || advAmountMaxNum.value != null) n++
+  if (advDateFrom.value || advDateTo.value) n++
+  if (advPayments.value.size > 0) n++
+  if (advStatus.value !== 'all') n++
+  return n
+})
+
+function clearAdvanced() {
+  advAmountMin.value = ''
+  advAmountMax.value = ''
+  advDateFrom.value = ''
+  advDateTo.value = ''
+  advPayments.value = new Set()
+  advStatus.value = 'all'
+}
+
+// ── 중복 의심 거래 ──
+//
+// 판정 범위는 **전체 거래**다. 필터 결과 안에서만 세면 짝이 필터 밖에 있을 때
+// 중복이 안 보여서, 엑셀 중복 업로드를 잡는다는 목적을 놓친다.
+const dupCounts = computed(() => duplicateCounts(transactions.value))
+function dupCountOf(t: Transaction): number {
+  return dupCounts.value.get(duplicateKey(t)) ?? 1
+}
+function isDuplicate(t: Transaction): boolean {
+  return dupCountOf(t) > 1
+}
+
+/** 상태 필터 판정 — useExpenses의 집계 규칙과 같은 기준을 쓴다 */
+function matchesStatus(t: Transaction): boolean {
+  switch (advStatus.value) {
+    case 'expense':   return !isIncomeCategory(t.category) && !isExcluded(t) && !isNegativeAmount(t)
+    case 'income':    return isIncomeCategory(t.category)
+    case 'excluded':  return isUserExcluded(t)
+    case 'negative':  return isNegativeAmount(t)
+    case 'duplicate': return isDuplicate(t)
+    default:          return true
+  }
+}
+
+/** 검색 결과 위에 고급 필터를 한 번 더 적용 */
+const advFiltered = computed<Transaction[]>(() => {
+  const lo = advAmountMinNum.value
+  const hi = advAmountMaxNum.value
+  const from = advDateFrom.value
+  const to = advDateTo.value
+  const pays = advPayments.value
+  const noFilter =
+    lo == null && hi == null && !from && !to && pays.size === 0 && advStatus.value === 'all'
+  if (noFilter) return searchFiltered.value
+  return searchFiltered.value.filter((t) => {
+    if (!inAmountRange(t, lo, hi)) return false
+    if (!inDateRange(t, from, to)) return false
+    if (pays.size > 0 && !pays.has(t.paymentMethod)) return false
+    if (!matchesStatus(t)) return false
+    return true
+  })
+})
+
 // ── 정렬 ──
-// 날짜/금액 컬럼 헤더 클릭으로 토글. 같은 키 재클릭 시 방향 전환, 다른 키면 desc로 시작.
-type SortKey = 'date' | 'amount'
-type SortDir = 'asc' | 'desc'
+// 컬럼 헤더 클릭으로 토글. 같은 키 재클릭 시 방향 전환, 다른 키면 desc로 시작.
+// 비교기는 utils/txTable.ts의 compareBy — 한글은 Intl.Collator로 정렬한다.
 const sortKey = ref<SortKey>('date')
 const sortDir = ref<SortDir>('desc')
 
@@ -123,20 +251,64 @@ function sortIndicator(key: SortKey): string {
 }
 
 const tableFiltered = computed<Transaction[]>(() => {
-  const arr = searchFiltered.value.slice()
-  const dir = sortDir.value === 'asc' ? 1 : -1
-  arr.sort((a, b) => {
-    if (sortKey.value === 'date') {
-      const diff = a.date.getTime() - b.date.getTime()
-      // 날짜가 같으면 id로 안정 정렬 (입력 순서 유지)
-      return diff !== 0 ? diff * dir : a.id.localeCompare(b.id)
-    }
-    // amount
-    const diff = a.amount - b.amount
-    return diff !== 0 ? diff * dir : a.date.getTime() - b.date.getTime()
-  })
+  const arr = advFiltered.value.slice()
+  arr.sort(compareBy(sortKey.value, sortDir.value))
   return arr
 })
+
+// ── 컬럼 표시 설정 ──
+//
+// 설정은 txTableViewRepo가 즉시 영속화한다(거래 데이터의 명시 저장과 무관한 별도 키).
+// '내용'과 '금액'은 이 표의 존재 이유라 끌 수 없다 — TX_COLUMNS의 hideable이 그 규칙의 단일 소스.
+const showColumnMenu = ref(false)
+const visibleColumns = computed<Set<ColumnKey>>(() => {
+  const saved = new Set(txTableViewRepo.state.value.columns)
+  // 숨길 수 없는 컬럼은 저장값과 무관하게 항상 켠다
+  for (const c of TX_COLUMNS) if (!c.hideable) saved.add(c.key)
+  return saved
+})
+function showCol(key: ColumnKey): boolean {
+  return visibleColumns.value.has(key)
+}
+function toggleColumn(key: ColumnKey) {
+  const col = TX_COLUMNS.find((c) => c.key === key)
+  if (!col || !col.hideable) return
+  const cur = txTableViewRepo.state.value.columns
+  const next = cur.includes(key) ? cur.filter((c) => c !== key) : [...cur, key]
+  // ALL_COLUMN_KEYS 순서를 유지해야 저장값을 사람이 읽었을 때도 표 순서와 같다
+  txTableViewRepo.state.value = { columns: ALL_COLUMN_KEYS.filter((c) => next.includes(c)) }
+}
+function resetColumns() {
+  txTableViewRepo.state.value = { columns: [...ALL_COLUMN_KEYS] }
+}
+const hiddenColumnCount = computed(() => HIDEABLE_COLUMN_KEYS.filter((k) => !showCol(k)).length)
+/** 정렬 가능한 컬럼만 헤더 버튼을 그린다 */
+const columnDefs = TX_COLUMNS
+const hideableColumns = TX_COLUMNS.filter((c) => c.hideable)
+
+/** 표 최소 폭 — 컬럼을 끄면 함께 줄어든다 (table-layout:fixed라 직접 계산해야 한다) */
+const tableMinWidthPx = computed(() => tableMinWidth(visibleColumns.value, deleteMode.value ? 40 : 0))
+
+// ── 엑셀 내보내기 ──
+//
+// 지금 테이블에 보이는 목록(전역 필터 + 카테고리 칩 + 테이블 검색 + 정렬)을 그대로 내보낸다.
+// 현재 페이지가 아니라 필터 결과 **전체**가 대상이다.
+// 열 구성은 업로드 양식과 같아서 내려받은 파일을 그대로 다시 올릴 수 있다.
+const exporting = ref(false)
+const exportError = ref('')
+
+async function onExportXlsx() {
+  if (exporting.value || tableFiltered.value.length === 0) return
+  exporting.value = true
+  exportError.value = ''
+  try {
+    await downloadTransactionsXlsx(tableFiltered.value.map((t) => ({ ...t })))
+  } catch (e) {
+    exportError.value = `엑셀을 만들지 못했습니다: ${(e as Error).message}`
+  } finally {
+    exporting.value = false
+  }
+}
 
 // ── 페이지네이션 ──
 // 기존엔 상위 N건만 잘라 보여줘서 500건 이후 거래에 접근할 수 없었다.
@@ -165,6 +337,8 @@ watch(selectedCategories, () => { page.value = 1 })
 watch([sortKey, sortDir], () => { page.value = 1 })
 // 테이블 검색어 변경 시 1페이지로 리셋
 watch(tableSearch, () => { page.value = 1 })
+// 고급 필터 변경 시 1페이지로 리셋
+watch([advAmountMin, advAmountMax, advDateFrom, advDateTo, advPayments, advStatus], () => { page.value = 1 })
 
 function goFirst() { page.value = 1 }
 function goPrev()  { if (page.value > 1) page.value-- }
@@ -188,6 +362,45 @@ const pageWindow = computed<number[]>(() => {
 })
 
 const COST_TYPES: CostType[] = ['고정비', '변동비']
+
+// ───────── 합계 푸터 ─────────
+//
+// 대상은 **현재 페이지가 아니라 조회 결과 전체**(tableFiltered)다.
+// 집계 규칙은 useExpenses의 filtered / incomeFiltered와 글자 그대로 같아야 한다.
+// 다르면 대시보드 KPI와 표 하단 숫자가 어긋나 어느 쪽을 믿어야 할지 알 수 없게 된다.
+//   지출 = 지출 카테고리 & 제외 아님 & 음수 아님
+//   수입 = 수입 카테고리 & 음수 아님
+//   제외 = 사용자가 직접 제외한 지출 거래
+//   음수/환불 = 원본 금액이 음수인 거래 (합계에 반영되지 않는다)
+const footerTotals = computed(() => {
+  let expense = 0, expenseCount = 0
+  let income = 0, incomeCount = 0
+  let excluded = 0, exCount = 0
+  let negative = 0, negCount = 0
+  for (const t of tableFiltered.value) {
+    const amt = Number(t.amount) || 0
+    const isIncome = isIncomeCategory(t.category)
+    if (isNegativeAmount(t)) { negative += amt; negCount++ }
+    if (isIncome) {
+      if (!isNegativeAmount(t)) { income += amt; incomeCount++ }
+    } else {
+      if (isExcluded(t)) { excluded += amt; exCount++ }
+      else if (!isNegativeAmount(t)) { expense += amt; expenseCount++ }
+    }
+  }
+  return {
+    expense, expenseCount,
+    income, incomeCount,
+    excluded, exCount,
+    negative, negCount,
+    net: income - expense
+  }
+})
+
+/** 조회 결과 안에서 중복 의심으로 잡힌 건수 — 푸터에 경고로 띄운다 */
+const dupInViewCount = computed<number>(
+  () => tableFiltered.value.reduce((n, t) => n + (isDuplicate(t) ? 1 : 0), 0)
+)
 
 // ───────── 지출 계산 제외 ─────────
 //
@@ -241,9 +454,11 @@ function onToggleExcludeAll(value: boolean) {
     return
   }
   flashMsg(
-    value
-      ? `현재 페이지 ${r.changed.toLocaleString('ko-KR')}건을 지출 계산에서 제외했습니다`
-      : `현재 페이지 ${r.changed.toLocaleString('ko-KR')}건을 지출 계산에 다시 포함했습니다`
+    withBackupHint(
+      value
+        ? `현재 페이지 ${r.changed.toLocaleString('ko-KR')}건을 지출 계산에서 제외했습니다`
+        : `현재 페이지 ${r.changed.toLocaleString('ko-KR')}건을 지출 계산에 다시 포함했습니다`
+    )
   )
 }
 
@@ -256,7 +471,7 @@ function onToggleExcluded(id: string, value: boolean) {
     return
   }
   if (r.changed) {
-    flashMsg(value ? '지출 계산에서 제외했습니다 (1건)' : '지출 계산에 다시 포함했습니다 (1건)')
+    flashMsg(withBackupHint(value ? '지출 계산에서 제외했습니다 (1건)' : '지출 계산에 다시 포함했습니다 (1건)'))
   }
 }
 
@@ -328,9 +543,11 @@ function applyCategory(id: string, value: string, scope: UpdateScope) {
     return
   }
   flashMsg(
-    scope === 'single'
-      ? `이 거래만 변경 · ${value} (1건)`
-      : `관련 거래 일괄 변경 · '${r.description}' ${r.updated.toLocaleString('ko-KR')}건 → ${value}`
+    withBackupHint(
+      scope === 'single'
+        ? `이 거래만 변경 · ${value} (1건)`
+        : `관련 거래 일괄 변경 · '${r.description}' ${r.updated.toLocaleString('ko-KR')}건 → ${value}`
+    )
   )
 }
 
@@ -360,7 +577,7 @@ function onChangePayment(id: string, value: string) {
   if (r.category) {
     // 카테고리 select의 DOM 값을 새 카테고리와 다시 맞춘다
     selectRev.value++
-    flashMsg(`결제수단 '${value}' 매핑 적용 · 카테고리 → ${r.category}`)
+    flashMsg(withBackupHint(`결제수단 '${value}' 매핑 적용 · 카테고리 → ${r.category}`))
   }
 }
 function onChangeCostType(id: string, value: string) {
@@ -369,7 +586,7 @@ function onChangeCostType(id: string, value: string) {
   const tx = transactions.value.find((t) => t.id === id)
   if (!tx) return
   const n = updateByDescription(tx.description, { costType: value })
-  if (n > 1) flashMsg(`구분 일괄 변경: '${tx.description}' ${n}건 → ${value}`)
+  if (n > 1) flashMsg(withBackupHint(`구분 일괄 변경: '${tx.description}' ${n}건 → ${value}`))
 }
 
 // ───────── 삭제 모드 ─────────
@@ -380,8 +597,11 @@ function onChangeCostType(id: string, value: string) {
 const deleteMode = ref(false)
 const selectedForDelete = ref<Set<string>>(new Set())
 
-/** 삭제 모드에서 체크박스 컬럼이 하나 늘어난다 — colspan을 쓰는 행이 함께 따라가야 한다 */
-const columnCount = computed(() => (deleteMode.value ? 8 : 7))
+/**
+ * colspan을 쓰는 행(빈 목록 안내·카테고리 범위 선택·합계 푸터)이 따라가야 할 컬럼 수.
+ * 컬럼 토글과 삭제 모드 양쪽에 반응한다.
+ */
+const columnCount = computed(() => visibleColumns.value.size + (deleteMode.value ? 1 : 0))
 
 function toggleDeleteMode() {
   deleteMode.value = !deleteMode.value
@@ -430,7 +650,7 @@ function onDeleteSelected() {
   const extra = r.removedFromIncomeExpense > 0
     ? ` (수입/지출 관리 원본 ${r.removedFromIncomeExpense.toLocaleString('ko-KR')}건 포함)`
     : ''
-  flashMsg(`${r.removed.toLocaleString('ko-KR')}건을 삭제했습니다${extra}`)
+  flashMsg(withBackupHint(`${r.removed.toLocaleString('ko-KR')}건을 삭제했습니다${extra}`))
 }
 
 // 필터·검색 등으로 목록에서 사라진 id는 선택에서 정리한다 (보이지 않는 행이 삭제되지 않도록)
@@ -449,13 +669,13 @@ let toastTimer: number | undefined
 function flashMsg(msg: string, kind: 'ok' | 'err' = 'ok') {
   toast.value = { kind, text: msg }
   if (toastTimer) window.clearTimeout(toastTimer)
-  toastTimer = window.setTimeout(() => (toast.value = null), 2400) as unknown as number
+  toastTimer = window.setTimeout(() => (toast.value = null), 3600) as unknown as number
 }
 
 function onSave() {
   const r = saveToStorage()
   // 저장에 성공했을 때만 완료 알림을 띄운다. 실패는 실패대로 알려야 하므로 err 토스트.
-  if (r.ok) flashMsg(`저장 완료 · ${r.count.toLocaleString('ko-KR')}건`)
+  if (r.ok) flashMsg(withBackupHint(`저장 완료 · ${r.count.toLocaleString('ko-KR')}건`))
   else flashMsg(`저장 실패: ${r.reason ?? '알 수 없는 오류'}`, 'err')
 }
 
@@ -518,7 +738,7 @@ function onSubmitAdd() {
     note: draft.value.note
   })
   if (!tx) { addError.value = '추가에 실패했습니다'; return }
-  flashMsg(`거래 추가됨 · 1건 (저장 누름 시 영구 보관)`)
+  flashMsg(withBackupHint(`거래 추가됨 · 1건 (저장 누름 시 영구 보관)`))
   // 폼 초기화 후 닫기 (연속 입력 시엔 다시 열 수 있도록)
   draft.value = emptyDraft()
   showAddForm.value = false
@@ -606,6 +826,17 @@ const txCount = computed(() => transactions.value.length)
         </button>
         <button
           type="button"
+          class="btn-action btn-action-export"
+          :disabled="exporting || total === 0"
+          :title="total === 0
+            ? '내보낼 거래가 없습니다'
+            : `필터 결과 ${total.toLocaleString('ko-KR')}건을 업로드 양식과 같은 엑셀(.xlsx)로 내려받습니다`"
+          @click="onExportXlsx"
+        >
+          {{ exporting ? '만드는 중...' : `⬇ 엑셀 다운로드${total > 0 ? ` (${total.toLocaleString('ko-KR')})` : ''}` }}
+        </button>
+        <button
+          type="button"
           :class="['btn-action btn-action-save', unsavedChanges ? 'btn-action-save-dirty' : '']"
           :disabled="txCount === 0"
           :title="txCount === 0 ? '저장할 거래가 없습니다' : saveHint"
@@ -638,12 +869,16 @@ const txCount = computed(() => transactions.value.length)
       </div>
     </div>
 
+    <p v-if="exportError" class="mb-3 text-sm rounded-md bg-red-50 text-red-700 px-3 py-2">
+      {{ exportError }}
+    </p>
+
     <!-- 안내 토스트 — 화면 우측 상단 고정. 표 레이아웃에 영향을 주지 않는다. -->
     <transition name="fade">
       <div
         v-if="toast"
         :class="[
-          'fixed top-6 right-6 z-50 px-4 py-2 rounded-lg shadow text-sm',
+          'fixed top-6 right-6 z-50 px-4 py-2 rounded-lg shadow text-sm whitespace-pre-line max-w-sm leading-relaxed',
           toast.kind === 'ok' ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white'
         ]"
         role="status"
@@ -672,6 +907,122 @@ const txCount = computed(() => transactions.value.length)
       <span v-if="tableSearch.trim()" class="text-[11px] text-slate-500 tabular-nums">
         {{ total.toLocaleString('ko-KR') }}건 일치
       </span>
+
+      <div class="ml-auto flex items-center gap-1.5">
+        <button
+          type="button"
+          :class="['tool-btn', showAdvanced || advActiveCount > 0 ? 'tool-btn-on' : '']"
+          :title="advActiveCount > 0 ? `고급 필터 ${advActiveCount}개 적용 중` : '금액·날짜 범위, 결제수단, 상태로 좁히기'"
+          @click="showAdvanced = !showAdvanced"
+        >
+          필터
+          <span v-if="advActiveCount > 0" class="tool-badge">{{ advActiveCount }}</span>
+          <span class="tool-caret">{{ showAdvanced ? '▴' : '▾' }}</span>
+        </button>
+        <div class="relative">
+          <button
+            type="button"
+            :class="['tool-btn', showColumnMenu || hiddenColumnCount > 0 ? 'tool-btn-on' : '']"
+            :title="hiddenColumnCount > 0 ? `${hiddenColumnCount}개 컬럼 숨김` : '표시할 컬럼 고르기'"
+            @click="showColumnMenu = !showColumnMenu"
+          >
+            컬럼
+            <span v-if="hiddenColumnCount > 0" class="tool-badge">-{{ hiddenColumnCount }}</span>
+            <span class="tool-caret">{{ showColumnMenu ? '▴' : '▾' }}</span>
+          </button>
+          <!-- 컬럼 토글 메뉴 — '내용'과 '금액'은 목록에 없다(끌 수 없는 컬럼) -->
+          <div v-if="showColumnMenu" class="col-menu">
+            <p class="col-menu-title">표시할 컬럼</p>
+            <label v-for="c in hideableColumns" :key="c.key" class="col-menu-item">
+              <input type="checkbox" :checked="showCol(c.key)" @change="toggleColumn(c.key)" />
+              <span>{{ c.label }}</span>
+            </label>
+            <p class="col-menu-note">내용·금액은 끌 수 없습니다</p>
+            <button type="button" class="col-menu-reset" @click="resetColumns">전부 표시</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!--
+      고급 필터 패널.
+      검색창(문자열 부분일치)으로는 낼 수 없는 조건 — 금액 범위·날짜 범위·결제수단 다중 선택·상태 —
+      을 여기서 건다. 카테고리 칩과 마찬가지로 전역 FiltersBar 위에 겹쳐 적용된다.
+     -->
+    <div v-if="showAdvanced" class="adv-panel">
+      <div class="adv-grid">
+        <div class="adv-field">
+          <label class="adv-label">금액 범위</label>
+          <div class="adv-row">
+            <input v-model="advAmountMin" type="text" inputmode="numeric" placeholder="최소" class="adv-input" />
+            <span class="adv-tilde">~</span>
+            <input v-model="advAmountMax" type="text" inputmode="numeric" placeholder="최대" class="adv-input" />
+          </div>
+          <p class="adv-hint">절대값 기준 — 환불(음수) 거래도 금액으로 찾을 수 있습니다</p>
+        </div>
+
+        <div class="adv-field">
+          <label class="adv-label">날짜 범위</label>
+          <div class="adv-row">
+            <input v-model="advDateFrom" type="date" class="adv-input" />
+            <span class="adv-tilde">~</span>
+            <input v-model="advDateTo" type="date" class="adv-input" />
+          </div>
+          <p class="adv-hint">상단 기간 필터 위에 한 번 더 적용됩니다</p>
+        </div>
+
+        <div class="adv-field">
+          <label class="adv-label">상태</label>
+          <div class="adv-row flex-wrap">
+            <button
+              v-for="f in STATUS_FILTERS"
+              :key="f.value"
+              type="button"
+              :class="['cat-chip', advStatus === f.value ? 'cat-chip-active' : '']"
+              :title="f.title"
+              @click="advStatus = f.value"
+            >{{ f.label }}</button>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="paymentChips.length > 0" class="adv-field mt-2">
+        <label class="adv-label">결제수단 <span class="adv-label-sub">(여러 개 선택 가능)</span></label>
+        <div class="adv-row flex-wrap">
+          <button
+            type="button"
+            :class="['cat-chip', advPayments.size === 0 ? 'cat-chip-active' : '']"
+            @click="advPayments = new Set()"
+          >전체</button>
+          <button
+            v-for="pc in paymentChips"
+            :key="pc.name"
+            type="button"
+            :class="['cat-chip', advPayments.has(pc.name) ? 'cat-chip-active' : '']"
+            :title="`${pc.name} · ${pc.count.toLocaleString('ko-KR')}건`"
+            @click="togglePaymentChip(pc.name)"
+          >
+            {{ pc.name }}
+            <span class="cat-chip-count">{{ pc.count }}</span>
+          </button>
+        </div>
+      </div>
+
+      <p v-if="advAmountError || advDateError" class="adv-error">
+        {{ advAmountError || advDateError }}
+      </p>
+
+      <div class="adv-foot">
+        <span class="text-[11px] text-slate-500 tabular-nums">
+          {{ advActiveCount > 0 ? `필터 ${advActiveCount}개 적용 · ` : '' }}{{ total.toLocaleString('ko-KR') }}건
+        </span>
+        <button
+          type="button"
+          class="text-[11px] text-slate-500 hover:text-slate-700 underline"
+          :disabled="advActiveCount === 0"
+          @click="clearAdvanced"
+        >필터 초기화</button>
+      </div>
     </div>
 
     <!-- 카테고리 칩 필터 -->
@@ -768,7 +1119,7 @@ const txCount = computed(() => transactions.value.length)
       max-height는 viewport 비례로 두어 큰 모니터에선 더 많은 행이 보인다.
      -->
     <div class="tx-card-body -mx-1 px-1">
-      <table class="tx-table min-w-[980px] w-full text-sm">
+      <table class="tx-table w-full text-sm" :style="{ minWidth: tableMinWidthPx + 'px' }">
         <!--
           컬럼 폭 고정 (table-layout: fixed).
           이 colgroup이 각 컬럼의 폭을 결정하므로, 셀 내용(내역 길이·카테고리 이름·금액 자릿수·
@@ -778,13 +1129,13 @@ const txCount = computed(() => transactions.value.length)
         -->
         <colgroup>
           <col v-if="deleteMode" class="col-select" />
-          <col class="col-date" />
+          <col v-if="showCol('date')" class="col-date" />
           <col class="col-desc" />
-          <col class="col-category" />
-          <col class="col-payment" />
-          <col class="col-costtype" />
+          <col v-if="showCol('category')" class="col-category" />
+          <col v-if="showCol('paymentMethod')" class="col-payment" />
+          <col v-if="showCol('costType')" class="col-costtype" />
           <col class="col-amount" />
-          <col class="col-exclude" />
+          <col v-if="showCol('exclude')" class="col-exclude" />
         </colgroup>
         <thead class="sticky top-0 z-10 bg-white">
           <tr class="text-left text-xs text-slate-500 uppercase border-b border-slate-200">
@@ -800,7 +1151,7 @@ const txCount = computed(() => transactions.value.length)
                 @change="toggleDeleteSelectAll(($event.target as HTMLInputElement).checked)"
               />
             </th>
-            <th class="py-2 pr-3">
+            <th v-if="showCol('date')" class="py-2 pr-3">
               <button
                 type="button"
                 :class="['sort-th', sortKey === 'date' ? 'sort-th-active' : '']"
@@ -810,10 +1161,46 @@ const txCount = computed(() => transactions.value.length)
                 날짜 <span class="sort-arrow">{{ sortIndicator('date') }}</span>
               </button>
             </th>
-            <th class="py-2 pr-3">내용</th>
-            <th class="py-2 pr-3">카테고리</th>
-            <th class="py-2 pr-3">결제수단</th>
-            <th class="py-2 pr-3">구분</th>
+            <th class="py-2 pr-3">
+              <button
+                type="button"
+                :class="['sort-th', sortKey === 'description' ? 'sort-th-active' : '']"
+                @click="setSort('description')"
+                title="내용(가나다)으로 정렬"
+              >
+                내용 <span class="sort-arrow">{{ sortIndicator('description') }}</span>
+              </button>
+            </th>
+            <th v-if="showCol('category')" class="py-2 pr-3">
+              <button
+                type="button"
+                :class="['sort-th', sortKey === 'category' ? 'sort-th-active' : '']"
+                @click="setSort('category')"
+                title="카테고리(가나다)로 정렬"
+              >
+                카테고리 <span class="sort-arrow">{{ sortIndicator('category') }}</span>
+              </button>
+            </th>
+            <th v-if="showCol('paymentMethod')" class="py-2 pr-3">
+              <button
+                type="button"
+                :class="['sort-th', sortKey === 'paymentMethod' ? 'sort-th-active' : '']"
+                @click="setSort('paymentMethod')"
+                title="결제수단(가나다)으로 정렬"
+              >
+                결제수단 <span class="sort-arrow">{{ sortIndicator('paymentMethod') }}</span>
+              </button>
+            </th>
+            <th v-if="showCol('costType')" class="py-2 pr-3">
+              <button
+                type="button"
+                :class="['sort-th', sortKey === 'costType' ? 'sort-th-active' : '']"
+                @click="setSort('costType')"
+                title="고정비/변동비로 정렬"
+              >
+                구분 <span class="sort-arrow">{{ sortIndicator('costType') }}</span>
+              </button>
+            </th>
             <th class="py-2 pr-3 text-right">
               <button
                 type="button"
@@ -824,7 +1211,7 @@ const txCount = computed(() => transactions.value.length)
                 <span class="sort-arrow">{{ sortIndicator('amount') }}</span> 금액
               </button>
             </th>
-            <th class="py-2 pr-3 text-center whitespace-nowrap align-middle">
+            <th v-if="showCol('exclude')" class="py-2 pr-3 text-center whitespace-nowrap align-middle">
               <!--
                 헤더 전체가 하나의 클릭 영역이다 (label로 감쌌으므로 "지출 제외" 글자를 눌러도 동작).
                 대상은 현재 조회된 거래 목록 전체 — 다음 페이지에 있는 행까지 포함한다.
@@ -868,7 +1255,7 @@ const txCount = computed(() => transactions.value.length)
                 @change="toggleDeleteSelection(t.id, ($event.target as HTMLInputElement).checked)"
               />
             </td>
-            <td class="py-2 pr-3 tabular-nums text-slate-600 whitespace-nowrap">{{ formatDate(t.date) }}</td>
+            <td v-if="showCol('date')" class="py-2 pr-3 tabular-nums text-slate-600 whitespace-nowrap">{{ formatDate(t.date) }}</td>
             <!--
               내용 셀: [배지들] + [내용 텍스트]
               배지는 서로 독립적인 v-if 라서 "수입"과 "제외"가 동시에 표시된다.
@@ -903,13 +1290,24 @@ const txCount = computed(() => transactions.value.length)
                     class="tx-badge tx-badge-excluded"
                     title="지출 계산에서 제외된 거래입니다 (목록에는 그대로 남습니다)"
                   >제외</span>
+
+                  <!--
+                    중복 의심 — 날짜·금액·내용이 완전히 같은 거래가 2건 이상.
+                    판정은 전체 거래 기준이라 짝이 지금 필터 밖에 있어도 표시된다.
+                    자동으로 지우지 않는다(같은 가게에서 같은 금액을 두 번 쓴 정상 거래일 수 있다).
+                  -->
+                  <span
+                    v-if="isDuplicate(t)"
+                    class="tx-badge tx-badge-dup"
+                    :title="`날짜·금액·내용이 같은 거래가 전체 ${dupCountOf(t)}건 있습니다. 엑셀을 두 번 올렸을 수 있으니 확인해 보세요 — 정상 거래일 수도 있으므로 자동으로 지우지 않습니다.`"
+                  >중복 {{ dupCountOf(t) }}</span>
                 </span>
                 <span class="desc-text" :title="t.description">{{ t.description }}</span>
               </div>
             </td>
 
             <!-- 카테고리: 인라인 select (chip 스타일) — 숨김 항목은 옵션에서 제외하되 현재값은 보존 -->
-            <td class="py-2 pr-3">
+            <td v-if="showCol('category')" class="py-2 pr-3">
               <select
                 :key="`${t.id}:${t.category}:${selectRev}`"
                 :class="[
@@ -932,7 +1330,7 @@ const txCount = computed(() => transactions.value.length)
             </td>
 
             <!-- 결제수단: 인라인 select -->
-            <td class="py-2 pr-3">
+            <td v-if="showCol('paymentMethod')" class="py-2 pr-3">
               <select
                 class="cell-select bg-white text-slate-700"
                 :value="t.paymentMethod"
@@ -946,7 +1344,7 @@ const txCount = computed(() => transactions.value.length)
             </td>
 
             <!-- 구분: 인라인 select (고정비/변동비 색상 유지) -->
-            <td class="py-2 pr-3">
+            <td v-if="showCol('costType')" class="py-2 pr-3">
               <select
                 :class="[
                   'cell-select',
@@ -966,7 +1364,7 @@ const txCount = computed(() => transactions.value.length)
             </td>
 
             <!-- 지출 계산 제외 — 항상 이 거래 1건에만 적용된다 -->
-            <td class="py-2 pr-3 text-center">
+            <td v-if="showCol('exclude')" class="py-2 pr-3 text-center">
               <input
                 type="checkbox"
                 class="exclude-check"
@@ -1026,6 +1424,43 @@ const txCount = computed(() => transactions.value.length)
             </td>
           </tr>
         </tbody>
+
+        <!--
+          합계 푸터 — 현재 페이지가 아니라 **조회 결과 전체**의 합이다.
+          집계 규칙은 useExpenses의 filtered / incomeFiltered와 동일하므로
+          필터를 대시보드와 같게 맞추면 KPI 카드의 숫자와 일치한다.
+        -->
+        <tfoot v-if="total > 0" class="tx-foot">
+          <tr>
+            <td :colspan="columnCount" class="py-2.5 px-2">
+              <div class="foot-wrap">
+                <span class="foot-scope">조회 결과 {{ total.toLocaleString('ko-KR') }}건 합계</span>
+                <span class="foot-item foot-expense" title="지출 카테고리 · 제외 아님 · 음수 아님">
+                  지출 <b>{{ formatKRW(footerTotals.expense) }}</b>
+                  <i>{{ footerTotals.expenseCount.toLocaleString('ko-KR') }}건</i>
+                </span>
+                <span v-if="footerTotals.incomeCount > 0" class="foot-item foot-income" title="수입 카테고리 거래">
+                  수입 <b>{{ formatKRW(footerTotals.income) }}</b>
+                  <i>{{ footerTotals.incomeCount.toLocaleString('ko-KR') }}건</i>
+                </span>
+                <span v-if="footerTotals.incomeCount > 0" class="foot-item foot-net" title="수입 − 지출">
+                  순액 <b>{{ footerTotals.net < 0 ? '-' : '' }}{{ formatKRW(Math.abs(footerTotals.net)) }}</b>
+                </span>
+                <span v-if="footerTotals.exCount > 0" class="foot-item foot-excluded" title="직접 제외해 지출 합계에 빠진 금액">
+                  제외 <b>{{ formatKRW(footerTotals.excluded) }}</b>
+                  <i>{{ footerTotals.exCount.toLocaleString('ko-KR') }}건</i>
+                </span>
+                <span v-if="footerTotals.negCount > 0" class="foot-item foot-negative" title="원본 금액이 음수인 거래 — 합계에 반영되지 않습니다">
+                  음수/환불 <b>-{{ formatKRW(Math.abs(footerTotals.negative)) }}</b>
+                  <i>{{ footerTotals.negCount.toLocaleString('ko-KR') }}건</i>
+                </span>
+                <span v-if="dupInViewCount > 0" class="foot-item foot-dup" title="날짜·금액·내용이 같은 거래 — 엑셀 중복 업로드일 수 있습니다">
+                  중복 의심 <b>{{ dupInViewCount.toLocaleString('ko-KR') }}건</b>
+                </span>
+              </div>
+            </td>
+          </tr>
+        </tfoot>
       </table>
     </div>
     <!-- 페이지네이션 컨트롤 -->
@@ -1147,6 +1582,206 @@ const txCount = computed(() => transactions.value.length)
   opacity: 0.7;
 }
 .sort-th-active .sort-arrow { opacity: 1; }
+
+/* ─── 도구 버튼 (필터 / 컬럼) ─── */
+.tool-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  border: 1px solid rgb(203 213 225);
+  border-radius: 8px;
+  background: #fff;
+  color: rgb(71 85 105);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.12s ease;
+}
+.tool-btn:hover { border-color: rgb(148 163 184); color: rgb(15 23 42); }
+.tool-btn-on {
+  border-color: rgb(37 99 235);
+  color: rgb(37 99 235);
+  background: rgb(239 246 255);
+}
+.tool-badge {
+  display: inline-block;
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 9999px;
+  background: rgb(37 99 235);
+  color: #fff;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.tool-caret { font-size: 9px; opacity: 0.6; }
+
+/* 컬럼 토글 메뉴 */
+.col-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 30;
+  min-width: 160px;
+  padding: 8px;
+  border: 1px solid rgb(226 232 240);
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+}
+.col-menu-title {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: rgb(100 116 139);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-bottom: 6px;
+}
+.col-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 4px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: rgb(51 65 85);
+  cursor: pointer;
+}
+.col-menu-item:hover { background: rgb(248 250 252); }
+.col-menu-note {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgb(241 245 249);
+  font-size: 10.5px;
+  color: rgb(148 163 184);
+}
+.col-menu-reset {
+  margin-top: 4px;
+  width: 100%;
+  padding: 4px;
+  border: none;
+  border-radius: 6px;
+  background: rgb(241 245 249);
+  color: rgb(71 85 105);
+  font-size: 11px;
+  cursor: pointer;
+}
+.col-menu-reset:hover { background: rgb(226 232 240); color: rgb(15 23 42); }
+
+/* ─── 고급 필터 패널 ─── */
+.adv-panel {
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid rgb(226 232 240);
+  border-radius: 10px;
+  background: rgb(248 250 252);
+}
+.adv-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 1fr;
+}
+@media (min-width: 768px) {
+  .adv-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+.adv-field { min-width: 0; }
+.adv-label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgb(71 85 105);
+}
+.adv-label-sub { font-weight: 400; color: rgb(148 163 184); }
+.adv-row { display: flex; align-items: center; gap: 6px; }
+.adv-input {
+  min-width: 0;
+  flex: 1 1 0;
+  padding: 5px 8px;
+  border: 1px solid rgb(203 213 225);
+  border-radius: 7px;
+  font-size: 12px;
+  color: rgb(15 23 42);
+  background: #fff;
+}
+.adv-input:focus {
+  outline: none;
+  border-color: rgb(37 99 235);
+  box-shadow: 0 0 0 2px rgb(199 210 254);
+}
+.adv-tilde { color: rgb(148 163 184); font-size: 12px; flex: 0 0 auto; }
+.adv-hint { margin-top: 3px; font-size: 10.5px; color: rgb(148 163 184); }
+.adv-error {
+  margin-top: 8px;
+  padding: 5px 9px;
+  border-radius: 7px;
+  background: rgb(254 242 242);
+  color: rgb(185 28 28);
+  font-size: 11.5px;
+}
+.adv-foot {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid rgb(226 232 240);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.adv-foot button:disabled { opacity: 0.4; cursor: default; text-decoration: none; }
+
+/* ─── 합계 푸터 ─── */
+/*
+ * sticky는 <tfoot>가 아니라 <td>에 건다 — 브라우저마다 tfoot 자체의 sticky 지원이
+ * 갈려서, 셀에 걸어야 .tx-card-body 스크롤 중에도 합계가 바닥에 붙어 있는다.
+ */
+.tx-foot td {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  background: rgb(248 250 252);
+  border-top: 2px solid rgb(226 232 240);
+}
+.foot-wrap {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+}
+.foot-scope {
+  color: rgb(100 116 139);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.foot-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  color: rgb(71 85 105);
+  white-space: nowrap;
+}
+.foot-item b { font-variant-numeric: tabular-nums; font-weight: 700; }
+.foot-item i {
+  font-style: normal;
+  font-size: 10.5px;
+  color: rgb(148 163 184);
+  font-variant-numeric: tabular-nums;
+}
+.foot-expense b  { color: rgb(15 23 42); }
+.foot-income b   { color: rgb(5 150 105); }
+.foot-net b      { color: rgb(37 99 235); }
+.foot-excluded b { color: rgb(180 83 9); }
+.foot-negative b { color: rgb(124 58 237); }
+.foot-dup b      { color: rgb(219 39 119); }
+
+/* 중복 의심 배지 */
+.tx-badge-dup {
+  background: rgb(252 231 243);
+  color: rgb(157 23 77);
+}
 
 /* 카테고리 칩 필터 */
 .cat-chip {
@@ -1272,6 +1907,14 @@ const txCount = computed(() => transactions.value.length)
 .btn-action-save:hover:not(:disabled) {
   background: rgb(30 41 59);
   border-color: rgb(30 41 59);
+}
+.btn-action-export {
+  background: rgb(240 253 250);
+  border-color: rgb(153 246 228);
+  color: rgb(15 118 110);
+}
+.btn-action-export:hover:not(:disabled) {
+  background: rgb(204 251 241);
 }
 .btn-action-add {
   background: rgb(239 246 255);

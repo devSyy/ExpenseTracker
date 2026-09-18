@@ -10,6 +10,7 @@ import {
   type IncomeExpenseTx
 } from '~/composables/useIncomeExpense'
 import { useExpenses } from '~/composables/useExpenses'
+import { withBackupHint } from '~/utils/backupHint'
 
 useHead({ title: '수입/지출 관리 · 가계부' })
 
@@ -61,7 +62,7 @@ function onImportFromDashboard() {
     notify('ok', `이미 ${r.skipped}건이 모두 가져와져 있습니다`)
   } else if (r.added > 0) {
     expandFilterToCoverAll()
-    notify('ok', `월×카테고리 합계 ${r.added}건을 지출로 자동 입력했습니다${r.skipped > 0 ? ` · ${r.skipped}건 중복 제외` : ''}`)
+    notify('ok', withBackupHint(`월×카테고리 합계 ${r.added}건을 지출로 자동 입력했습니다${r.skipped > 0 ? ` · ${r.skipped}건 중복 제외` : ''}`))
   } else {
     notify('err', '가져올 거래가 없습니다')
   }
@@ -75,13 +76,13 @@ function onResyncFromDashboard() {
   }
   const r = importFromDashboard(dashboardTxs.value, { onlyNew: false, replace: true })
   expandFilterToCoverAll()
-  notify('ok', `재동기화 완료 · 제거 ${r.removed}건 / 합계 ${r.added}건 새로 입력`)
+  notify('ok', withBackupHint(`재동기화 완료 · 제거 ${r.removed}건 / 합계 ${r.added}건 새로 입력`))
 }
 
 function onClearDashboardImports() {
   if (!window.confirm(`사용내역에서 가져온 ${dashboardImportCount.value}건을 모두 제거할까요?`)) return
   const n = clearDashboardImports()
-  notify('ok', `${n}건이 제거되었습니다`)
+  notify('ok', withBackupHint(`${n}건이 제거되었습니다`))
 }
 
 // ── 토스트 ──
@@ -90,7 +91,7 @@ let toastTimer: number | undefined
 function notify(kind: 'ok' | 'err', text: string) {
   toast.value = { kind, text }
   if (toastTimer) window.clearTimeout(toastTimer)
-  toastTimer = window.setTimeout(() => (toast.value = null), 2400) as unknown as number
+  toastTimer = window.setTimeout(() => (toast.value = null), 3600) as unknown as number
 }
 
 // ── 입력 폼 ──
@@ -134,7 +135,7 @@ function onSubmit() {
     note: form.note
   })
   if (!tx) { notify('err', '저장에 실패했습니다'); return }
-  notify('ok', `${form.kind} ${fmtKRW(amt)}원이 추가되었습니다`)
+  notify('ok', withBackupHint(`${form.kind} ${fmtKRW(amt)}원이 추가되었습니다`))
   // 동일 구분으로 연속 입력하기 쉽도록 금액·내용·비고만 초기화
   form.amount = null
   form.description = ''
@@ -320,11 +321,11 @@ function commitEdit() {
     note: editDraft.note
   })
   editingId.value = null
-  notify('ok', '수정되었습니다')
+  notify('ok', withBackupHint('수정되었습니다'))
 }
 function onRemove(id: string) {
   if (!window.confirm('이 거래를 삭제할까요?')) return
-  if (remove(id)) notify('ok', '삭제되었습니다')
+  if (remove(id)) notify('ok', withBackupHint('삭제되었습니다'))
 }
 
 // ── 카테고리 아이콘(이모지) ──
@@ -406,7 +407,7 @@ function fmtSigned(t: IncomeExpenseTx): string {
       <div
         v-if="toast"
         :class="[
-          'fixed top-6 right-6 z-50 px-4 py-2 rounded-lg shadow text-sm',
+          'fixed top-6 right-6 z-50 px-4 py-2 rounded-lg shadow text-sm whitespace-pre-line max-w-sm leading-relaxed',
           toast.kind === 'ok' ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white'
         ]"
       >{{ toast.text }}</div>
@@ -572,10 +573,25 @@ function fmtSigned(t: IncomeExpenseTx): string {
 
       <!-- 카테고리 합산 테이블 -->
       <div v-if="viewMode === 'category'" class="overflow-x-auto rounded-lg border border-slate-200">
-        <table class="min-w-full text-sm">
+        <!--
+          컬럼 폭 고정 (table-layout: fixed).
+          카테고리 이름 길이·금액 자릿수·펼침 여부가 달라져도 컬럼 경계가 움직이지 않는다.
+          폭을 조정할 일이 생기면 이 colgroup과 아래 .ie-cat-table col 규칙만 고치면 된다.
+          남는 폭은 '카테고리'가 가져간다.
+        -->
+        <table class="ie-table ie-cat-table text-sm">
+          <colgroup>
+            <col class="cat-col-toggle" />
+            <col class="cat-col-kind" />
+            <col class="cat-col-name" />
+            <col class="cat-col-count" />
+            <col class="cat-col-avg" />
+            <col class="cat-col-latest" />
+            <col class="cat-col-total" />
+          </colgroup>
           <thead>
             <tr class="bg-slate-50 text-left text-xs text-slate-500 uppercase">
-              <th class="py-2 px-3 w-8"></th>
+              <th class="py-2 px-3"></th>
               <th class="py-2 px-3">구분</th>
               <th class="py-2 px-3">카테고리</th>
               <th class="py-2 px-3 text-right">건수</th>
@@ -595,9 +611,9 @@ function fmtSigned(t: IncomeExpenseTx): string {
                   <span :class="['kind-badge', g.kind === '수입' ? 'kind-income' : 'kind-expense']">{{ g.kind }}</span>
                 </td>
                 <td class="py-2 px-3">
-                  <span class="inline-flex items-center gap-1.5 text-slate-700 font-medium">
-                    <span class="text-base">{{ emoji(g.category) }}</span>
-                    {{ g.category }}
+                  <span class="cat-cell text-slate-700 font-medium" :title="g.category">
+                    <span class="cat-emoji">{{ emoji(g.category) }}</span>
+                    <span class="cat-name">{{ g.category }}</span>
                   </span>
                 </td>
                 <td class="py-2 px-3 text-right tabular-nums text-slate-600">{{ g.count.toLocaleString('ko-KR') }}건</td>
@@ -615,8 +631,8 @@ function fmtSigned(t: IncomeExpenseTx): string {
                 <tr v-for="t in g.items" :key="t.id" class="border-t border-slate-50 bg-slate-50/30">
                   <td class="py-1.5 px-3"></td>
                   <td class="py-1.5 px-3 tabular-nums text-slate-500 text-xs">{{ t.date }}</td>
-                  <td class="py-1.5 px-3 text-slate-600 text-xs" colspan="2">{{ t.description || '–' }}</td>
-                  <td class="py-1.5 px-3 text-slate-500 text-xs" colspan="2">{{ t.paymentMethod }}<span v-if="t.note" class="ml-2 text-slate-400">· {{ t.note }}</span></td>
+                  <td class="py-1.5 px-3 text-slate-600 text-xs cell-ellipsis" colspan="2" :title="t.description || ''">{{ t.description || '–' }}</td>
+                  <td class="py-1.5 px-3 text-slate-500 text-xs cell-ellipsis" colspan="2" :title="t.note ? `${t.paymentMethod} · ${t.note}` : t.paymentMethod">{{ t.paymentMethod }}<span v-if="t.note" class="ml-2 text-slate-400">· {{ t.note }}</span></td>
                   <td
                     :class="[
                       'py-1.5 px-3 text-right tabular-nums text-xs',
@@ -652,7 +668,24 @@ function fmtSigned(t: IncomeExpenseTx): string {
 
       <!-- 거래별 상세 테이블 -->
       <div v-else class="overflow-x-auto rounded-lg border border-slate-200">
-        <table class="min-w-full text-sm">
+        <!--
+          컬럼 폭 고정 (table-layout: fixed).
+          이 표는 같은 행이 '보기 행'과 '편집 행(input/select)' 두 모습을 오가므로,
+          고정하지 않으면 수정 버튼을 누르는 순간 컬럼이 통째로 밀린다.
+          '날짜'는 <input type="date">가 들어갈 폭(148px)을 기준으로 잡았다 — 더 줄이면 편집 행에서 잘린다.
+          남는 폭은 '내용'과 '비고'가 나눠 가진다.
+        -->
+        <table class="ie-table ie-tx-table text-sm">
+          <colgroup>
+            <col class="tx-col-date" />
+            <col class="tx-col-kind" />
+            <col class="tx-col-category" />
+            <col class="tx-col-desc" />
+            <col class="tx-col-payment" />
+            <col class="tx-col-amount" />
+            <col class="tx-col-note" />
+            <col class="tx-col-actions" />
+          </colgroup>
           <thead>
             <tr class="bg-slate-50 text-left text-xs text-slate-500 uppercase">
               <th class="py-2 px-3">날짜</th>
@@ -662,7 +695,7 @@ function fmtSigned(t: IncomeExpenseTx): string {
               <th class="py-2 px-3">결제수단</th>
               <th class="py-2 px-3 text-right">금액</th>
               <th class="py-2 px-3">비고</th>
-              <th class="py-2 px-3 text-center w-20">관리</th>
+              <th class="py-2 px-3 text-center">관리</th>
             </tr>
           </thead>
           <tbody>
@@ -674,20 +707,20 @@ function fmtSigned(t: IncomeExpenseTx): string {
                   <span :class="['kind-badge', t.kind === '수입' ? 'kind-income' : 'kind-expense']">{{ t.kind }}</span>
                 </td>
                 <td class="py-2 px-3">
-                  <span class="inline-flex items-center gap-1.5 text-slate-700">
-                    <span class="text-base">{{ emoji(t.category) }}</span>
-                    {{ t.category }}
+                  <span class="cat-cell text-slate-700" :title="t.category">
+                    <span class="cat-emoji">{{ emoji(t.category) }}</span>
+                    <span class="cat-name">{{ t.category }}</span>
                   </span>
                 </td>
-                <td class="py-2 px-3 text-slate-700">{{ t.description || '–' }}</td>
-                <td class="py-2 px-3 text-slate-600">{{ t.paymentMethod }}</td>
+                <td class="py-2 px-3 text-slate-700 cell-ellipsis" :title="t.description || ''">{{ t.description || '–' }}</td>
+                <td class="py-2 px-3 text-slate-600 cell-ellipsis" :title="t.paymentMethod">{{ t.paymentMethod }}</td>
                 <td
                   :class="[
                     'py-2 px-3 text-right tabular-nums font-semibold',
                     t.kind === '수입' ? 'text-blue-600' : 'text-rose-600'
                   ]"
                 >{{ fmtSigned(t) }}</td>
-                <td class="py-2 px-3 text-slate-500">{{ t.note || '–' }}</td>
+                <td class="py-2 px-3 text-slate-500 cell-ellipsis" :title="t.note || ''">{{ t.note || '–' }}</td>
                 <td class="py-2 px-3 text-center whitespace-nowrap">
                   <button type="button" class="icon-btn icon-edit" title="수정" @click="startEdit(t)">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
@@ -783,6 +816,92 @@ function fmtSigned(t: IncomeExpenseTx): string {
 .btn-mini-primary {
   @apply px-2 py-0.5 rounded bg-brand-600 text-white text-xs hover:bg-brand-700;
 }
+/* ─────────────────────────────────────────
+ * 거래 이력 테이블 — 컬럼 폭 고정
+ *
+ * table-layout: fixed 이면 브라우저가 셀 내용을 재지 않고 colgroup 폭만 본다.
+ * 그래서 카테고리 이름이 길어지거나, 금액 자릿수가 달라지거나, 페이지를 넘기거나,
+ * 행이 편집 모드(input/select)로 바뀌어도 컬럼 경계가 움직이지 않는다.
+ *
+ * 폭이 부족해 잘리는 건 말줄임(.cell-ellipsis / .cat-name)으로 처리하고
+ * 전체 내용은 title 툴팁으로 볼 수 있게 한다.
+ *
+ * min-width는 고정폭 합 + auto 컬럼 몫이다. 화면이 더 좁으면 바깥
+ * overflow-x-auto 래퍼가 가로 스크롤을 만든다.
+ * ───────────────────────────────────────── */
+.ie-table {
+  table-layout: fixed;
+  width: 100%;
+}
+
+/*
+ * 카테고리 합산 — 고정분 692px + 합계(auto)
+ *
+ * 남는 폭을 가져가는 auto 컬럼은 '합계'다. 처음엔 '카테고리'를 auto로 뒀는데,
+ * 이 표에서 auto 컬럼이 하나뿐이라 넓은 화면에서 남는 폭을 전부 흡수해
+ * 카테고리 한 컬럼만 800px 넘게 늘어났다. 카테고리 이름은 길어야 열 글자 남짓이므로
+ * 240px로 고정하고, 남는 폭은 우측 정렬 숫자인 '합계'가 받도록 바꿨다
+ * (숫자 컬럼은 여백이 늘어도 어색하지 않다).
+ */
+.ie-cat-table { min-width: 860px; }
+.cat-col-toggle { width: 36px; }
+.cat-col-kind   { width: 88px; }
+.cat-col-name   { width: 240px; }
+.cat-col-count  { width: 88px; }
+.cat-col-avg    { width: 128px; }
+.cat-col-latest { width: 112px; }
+.cat-col-total  { width: auto; min-width: 168px; }
+
+/*
+ * 거래별 상세 — 고정분 720px + 내용·비고(auto)
+ * auto 컬럼이 둘이라 남는 폭을 나눠 가진다 — 한 컬럼만 길어지지 않는다.
+ */
+.ie-tx-table { min-width: 1060px; }
+.tx-col-date     { width: 148px; }  /* <input type="date"> 기준 — 더 줄이면 편집 행에서 잘린다 */
+.tx-col-kind     { width: 88px; }
+.tx-col-category { width: 132px; }
+.tx-col-desc     { width: auto; }
+.tx-col-payment  { width: 132px; }
+.tx-col-amount   { width: 132px; }
+.tx-col-note     { width: auto; }
+.tx-col-actions  { width: 88px; }
+
+/* 고정 폭을 넘는 텍스트는 한 줄 말줄임 — 행 높이가 들쭉날쭉해지지 않게 */
+.ie-table .cell-ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 이모지 + 카테고리명 — 이모지는 줄지 않고 이름만 말줄임된다 */
+.cat-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.cat-emoji {
+  flex: 0 0 auto;
+  font-size: 1rem;
+  line-height: 1;
+}
+.cat-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * 편집 행의 입력 요소는 셀 폭을 넘지 않게 한다.
+ * table-layout: fixed 에서는 intrinsic 폭이 큰 <input type="date"> 같은 요소가
+ * 셀 밖으로 삐져나오므로 명시적으로 100%로 묶어 둔다.
+ */
+.ie-table td .form-input-sm {
+  width: 100%;
+  min-width: 0;
+}
+
 .kind-badge {
   display: inline-block;
   padding: 2px 10px;

@@ -118,6 +118,10 @@ watch(
               <li>· 내용 · 카테고리 · 결제수단 · 구분</li>
               <li>· 헤더명은 한/영 모두 자동 인식</li>
             </ul>
+            <div class="mt-3 rounded-lg bg-brand-50 border border-brand-200 px-3 py-2 text-sm text-brand-800 leading-relaxed">
+              💡 <b class="font-semibold">뱅크샐러드</b> 입출금(가계부) 내역 엑셀은
+              변환 없이 그대로 올리면 됩니다.
+            </div>
           </div>
         </div>
       </div>

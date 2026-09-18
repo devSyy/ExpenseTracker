@@ -6,6 +6,8 @@ export { categoriesRepo, paymentsRepo, FALLBACK_CATEGORY, FALLBACK_PAYMENT } fro
 export { transactionsRepo, transactionsMetaRepo, saveTransactions, clearTransactions, memberMeta } from './transactionsRepository'
 export type { MemberMeta } from './transactionsRepository'
 export { incomeExpenseRepo } from './incomeExpenseRepository'
+export { txTableViewRepo, defaultTxTableView, TX_TABLE_VIEW_KEY } from './txTableViewRepository'
+export type { TxTableView } from './txTableViewRepository'
 export { assetsRepo, defaultAssetsState } from './assetsRepository'
 export { loansRepo, defaultLoanState } from './loansRepository'
 export { savingsInfoRepo, savingsHistoryRepo, defaultSavingsInfo } from './savingsRepository'

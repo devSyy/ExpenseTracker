@@ -8,6 +8,7 @@ import {
   roleColor,
   type FamilyMember
 } from '~/composables/useFamily'
+import { withBackupHint } from '~/utils/backupHint'
 
 useHead({ title: '가족 관리 · 가계부' })
 
@@ -34,7 +35,7 @@ let toastTimer: number | undefined
 function notify(kind: 'ok' | 'err', text: string) {
   toast.value = { kind, text }
   if (toastTimer) window.clearTimeout(toastTimer)
-  toastTimer = window.setTimeout(() => (toast.value = null), 2400) as unknown as number
+  toastTimer = window.setTimeout(() => (toast.value = null), 3600) as unknown as number
 }
 
 // ── 가족 이름 편집 ──
@@ -47,7 +48,7 @@ function startEditFamilyName() {
 function commitEditFamilyName() {
   setFamilyName(familyNameDraft.value)
   editingFamilyName.value = false
-  notify('ok', '가족 이름이 저장되었습니다')
+  notify('ok', withBackupHint('가족 이름이 저장되었습니다'))
 }
 function cancelEditFamilyName() {
   editingFamilyName.value = false
@@ -72,7 +73,7 @@ function onAddMember() {
   })
   resetNew()
   adding.value = false
-  notify('ok', `'${m.name}' 멤버가 추가되었습니다`)
+  notify('ok', withBackupHint(`'${m.name}' 멤버가 추가되었습니다`))
 }
 
 // ── 인라인 편집 ──
@@ -96,7 +97,7 @@ function commitEdit() {
     note: editDraft.note?.trim() || undefined
   })
   editingId.value = null
-  notify('ok', '멤버가 수정되었습니다')
+  notify('ok', withBackupHint('멤버가 수정되었습니다'))
 }
 
 function onRemove(id: string, name: string) {
@@ -104,13 +105,13 @@ function onRemove(id: string, name: string) {
     notify('err', '최소 한 명의 가족 구성원은 유지되어야 합니다'); return
   }
   if (!window.confirm(`'${name}' 멤버를 삭제할까요?`)) return
-  if (removeMember(id)) notify('ok', `'${name}' 삭제됨`)
+  if (removeMember(id)) notify('ok', withBackupHint(`'${name}' 삭제됨`))
 }
 
 function onResetAll() {
   if (!window.confirm('가족 구성원을 기본값(남편·아내)으로 초기화할까요?')) return
   resetToDefaults()
-  notify('ok', '기본값으로 초기화됨')
+  notify('ok', withBackupHint('기본값으로 초기화됨'))
 }
 
 // 자주 쓰는 이모지 프리셋
@@ -136,7 +137,7 @@ const COLOR_PRESETS = ['#3b82f6', '#ec4899', '#10b981', '#f59e0b', '#8b5cf6', '#
       <div
         v-if="toast"
         :class="[
-          'fixed top-6 right-6 z-50 px-4 py-2 rounded-lg shadow text-sm',
+          'fixed top-6 right-6 z-50 px-4 py-2 rounded-lg shadow text-sm whitespace-pre-line max-w-sm leading-relaxed',
           toast.kind === 'ok' ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white'
         ]"
       >{{ toast.text }}</div>

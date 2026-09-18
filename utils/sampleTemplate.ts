@@ -4,6 +4,7 @@
 // 카테고리·결제수단은 사용자가 설정한 목록을 우선 사용하고, 비어 있으면 기본값을 쓴다.
 // 시트는 1개만 만든다 — 안내용 시트를 덧붙이면 업로드 시 "여러 시트" 경고가 뜬다.
 import { DEFAULT_CATEGORIES, DEFAULT_PAYMENT_METHODS } from '~/utils/types'
+import { downloadBytes, XLSX_MIME } from '~/utils/download'
 
 /** 샘플 양식의 헤더 (parseExcel 의 HEADER_ALIASES 에 정확히 일치하는 이름들) */
 export const SAMPLE_HEADERS = ['날짜', '내용', '금액', '카테고리', '결제수단', '구분', '비고'] as const
@@ -70,15 +71,5 @@ export async function buildSampleWorkbook(opts: SampleTemplateOptions = {}): Pro
 /** 샘플 양식(.xlsx)을 브라우저에서 내려받는다. (클라이언트 전용) */
 export async function downloadSampleTemplate(opts: SampleTemplateOptions = {}): Promise<void> {
   const bytes = await buildSampleWorkbook(opts)
-  const blob = new Blob([bytes], {
-    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-  })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = opts.fileName || SAMPLE_FILE_NAME
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  URL.revokeObjectURL(url)
+  downloadBytes(bytes, opts.fileName || SAMPLE_FILE_NAME, XLSX_MIME)
 }

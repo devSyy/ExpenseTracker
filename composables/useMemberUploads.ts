@@ -9,6 +9,8 @@
 //
 // 기존 아키텍처(모듈 스코프 상태 + use* 접근자)를 그대로 따르며 새 상태관리 라이브러리는 도입하지 않는다.
 import { computed, reactive } from 'vue'
+import { joinURL } from 'ufo'
+import { tryUseNuxtApp } from '#app'
 import { parseExpenseFile, isSupportedFileName, SUPPORTED_EXTENSIONS } from '~/utils/parseExcel'
 import { applyPaymentMappings, useExpenses, type MemberSaveResult, type SaveMode } from '~/composables/useExpenses'
 import { useFamily } from '~/composables/useFamily'
@@ -196,6 +198,21 @@ async function handleFile(memberId: string | null | undefined, file: File): Prom
   slot.message = ''
 }
 
+/**
+ * public/ 자산의 실제 경로를 만든다.
+ *
+ * GitHub Pages(Project Pages)에 올리면 앱이 '/ExpenseTracker/' 아래에 놓이므로
+ * '/sample-expenses.csv' 같은 절대경로는 도메인 루트를 가리켜 404가 난다.
+ * 라우터 링크(NuxtLink)는 baseURL을 자동으로 붙여 주지만 fetch는 그렇지 않다.
+ *
+ * tryUseNuxtApp()을 쓰는 이유: 이 함수는 setup이 아니라 이벤트 핸들러에서 불리므로
+ * Nuxt 컨텍스트가 없을 수 있다. 없으면 루트 배포로 보고 '/'로 떨어진다.
+ */
+function publicAssetUrl(path: string): string {
+  const base = tryUseNuxtApp()?.$config?.app?.baseURL ?? '/'
+  return joinURL(base, path)
+}
+
 /** 샘플 CSV를 특정 멤버 슬롯으로 불러온다. (기존 "샘플 데이터 불러오기" 기능 유지) */
 async function loadSample(memberId: string | null | undefined): Promise<void> {
   if (!memberId) return
@@ -203,7 +220,7 @@ async function loadSample(memberId: string | null | undefined): Promise<void> {
   slot.status = 'parsing'
   slot.error = ''
   try {
-    const res = await fetch('/sample-expenses.csv')
+    const res = await fetch(publicAssetUrl('sample-expenses.csv'))
     if (!res.ok) throw new Error('샘플 파일을 불러올 수 없습니다.')
     const blob = await res.blob()
     await handleFile(memberId, new File([blob], 'sample-expenses.csv', { type: 'text/csv' }))

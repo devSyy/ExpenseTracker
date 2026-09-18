@@ -3,6 +3,7 @@
 // 영속화/계산은 useSavings 컴포저블(→ savingsRepository) 책임.
 import { computed, reactive, ref, watch } from 'vue'
 import { useSavings, type PaymentEntry } from '~/composables/useSavings'
+import { withBackupHint } from '~/utils/backupHint'
 
 useHead({ title: '예금/적금 관리 · 가계부 대시보드' })
 
@@ -34,7 +35,7 @@ let toastTimer: number | undefined
 function notify(kind: 'ok' | 'err', text: string) {
   toast.value = { kind, text }
   if (toastTimer) window.clearTimeout(toastTimer)
-  toastTimer = window.setTimeout(() => (toast.value = null), 2400) as unknown as number
+  toastTimer = window.setTimeout(() => (toast.value = null), 3600) as unknown as number
 }
 
 // ── 납입 이력 입력 ──
@@ -50,7 +51,7 @@ function onAddPayment() {
   const r = addPayment({ date: draft.date, amount: amt })
   if (!r) { notify('err', '추가에 실패했습니다'); return }
   draft.amount = null
-  notify('ok', '납입 이력이 추가되었습니다')
+  notify('ok', withBackupHint('납입 이력이 추가되었습니다'))
 }
 
 // ── 인라인 편집 ──
@@ -74,17 +75,17 @@ function commitEdit() {
     date: editDraft.date, amount: amt, note: editDraft.note.trim()
   })
   editingId.value = null
-  notify('ok', '수정되었습니다')
+  notify('ok', withBackupHint('수정되었습니다'))
 }
 
 function removePayment(id: string) {
   if (!window.confirm('이 납입 이력을 삭제할까요?')) return
-  if (removePaymentAction(id)) notify('ok', '삭제되었습니다')
+  if (removePaymentAction(id)) notify('ok', withBackupHint('삭제되었습니다'))
 }
 
 // ── 적금 정보 저장/초기화 ──
 function onSaveInfo() {
-  if (saveInfo()) notify('ok', '적금 정보가 저장되었습니다')
+  if (saveInfo()) notify('ok', withBackupHint('적금 정보가 저장되었습니다'))
   else notify('err', '저장에 실패했습니다')
 }
 function onResetInfo() {
@@ -142,7 +143,7 @@ function fmtDateTime(iso: string): string {
       <div
         v-if="toast"
         :class="[
-          'fixed top-6 right-6 z-50 px-4 py-2 rounded-lg shadow text-sm',
+          'fixed top-6 right-6 z-50 px-4 py-2 rounded-lg shadow text-sm whitespace-pre-line max-w-sm leading-relaxed',
           toast.kind === 'ok' ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white'
         ]"
       >{{ toast.text }}</div>

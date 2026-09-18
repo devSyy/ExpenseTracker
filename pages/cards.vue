@@ -4,6 +4,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { Bar } from 'vue-chartjs'
 import { useCards, type CardItem, type CardBenefitTier } from '~/composables/useCards'
+import { withBackupHint } from '~/utils/backupHint'
 
 useHead({ title: '카드 관리 · 가계부' })
 
@@ -36,7 +37,7 @@ let toastTimer: number | undefined
 function notify(kind: 'ok' | 'err', text: string) {
   toast.value = { kind, text }
   if (toastTimer) window.clearTimeout(toastTimer)
-  toastTimer = window.setTimeout(() => (toast.value = null), 2400) as unknown as number
+  toastTimer = window.setTimeout(() => (toast.value = null), 3600) as unknown as number
 }
 
 // ── 카드 추가/편집 ──
@@ -65,7 +66,7 @@ function onAddCard() {
   addCard({ ...newCardDraft, benefits: [] })
   resetAddDraft()
   adding.value = false
-  notify('ok', '카드가 추가되었습니다')
+  notify('ok', withBackupHint('카드가 추가되었습니다'))
 }
 
 function toggleNewLink(pm: string) {
@@ -98,7 +99,7 @@ function commitEditCard() {
     linkedPaymentMethods: editCardDraft.linkedPaymentMethods ?? []
   })
   editingCardId.value = null
-  notify('ok', '카드가 수정되었습니다')
+  notify('ok', withBackupHint('카드가 수정되었습니다'))
 }
 function toggleEditLink(pm: string) {
   const list = editCardDraft.linkedPaymentMethods ?? []
@@ -108,7 +109,7 @@ function toggleEditLink(pm: string) {
 }
 function onRemoveCard(id: string) {
   if (!window.confirm('이 카드와 모든 혜택 정보를 삭제할까요?')) return
-  if (removeCard(id)) notify('ok', '카드가 삭제되었습니다')
+  if (removeCard(id)) notify('ok', withBackupHint('카드가 삭제되었습니다'))
 }
 
 function onAutoGenerate() {
@@ -117,7 +118,7 @@ function onAutoGenerate() {
   }
   const r = autoGenerateFromDashboard()
   if (r.added > 0) {
-    notify('ok', `${r.added}개 카드가 자동 생성되었습니다${r.skipped > 0 ? ` · ${r.skipped}개는 이미 연결됨` : ''}`)
+    notify('ok', withBackupHint(`${r.added}개 카드가 자동 생성되었습니다${r.skipped > 0 ? ` · ${r.skipped}개는 이미 연결됨` : ''}`))
   } else {
     notify('ok', `이미 모든 결제수단(${r.skipped}개)이 카드에 연결되어 있습니다`)
   }
@@ -138,7 +139,7 @@ function onAddBenefit(cardId: string) {
   if (!d.benefit.trim()) { notify('err', '혜택 내용을 입력하세요'); return }
   addBenefit(cardId, { threshold: t, benefit: d.benefit.trim(), benefitValue: Number(d.benefitValue) || undefined })
   benefitDrafts[cardId] = { threshold: 0, benefit: '', benefitValue: 0 }
-  notify('ok', '혜택이 추가되었습니다')
+  notify('ok', withBackupHint('혜택이 추가되었습니다'))
 }
 function onRemoveBenefit(cardId: string, idx: number) {
   if (!window.confirm('이 혜택을 삭제할까요?')) return
@@ -164,7 +165,7 @@ function commitEditBenefit() {
     benefitValue: Number(editBenefitDraft.benefitValue) || undefined
   })
   editingBenefit.value = null
-  notify('ok', '혜택이 수정되었습니다')
+  notify('ok', withBackupHint('혜택이 수정되었습니다'))
 }
 
 // ── 포맷터 ──
@@ -290,7 +291,7 @@ function lightenColor(hex: string, amount = 30): string {
       <div
         v-if="toast"
         :class="[
-          'fixed top-6 right-6 z-50 px-4 py-2 rounded-lg shadow text-sm',
+          'fixed top-6 right-6 z-50 px-4 py-2 rounded-lg shadow text-sm whitespace-pre-line max-w-sm leading-relaxed',
           toast.kind === 'ok' ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white'
         ]"
       >{{ toast.text }}</div>

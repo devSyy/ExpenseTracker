@@ -3,6 +3,7 @@
 import { computed, reactive, ref } from 'vue'
 import { Bar, Doughnut, Line } from 'vue-chartjs'
 import { useLoans, type Loan } from '~/composables/useLoans'
+import { withBackupHint } from '~/utils/backupHint'
 
 useHead({ title: '대출 현황 · 가계부' })
 
@@ -29,7 +30,7 @@ let toastTimer: number | undefined
 function notify(kind: 'ok' | 'err', text: string) {
   toast.value = { kind, text }
   if (toastTimer) window.clearTimeout(toastTimer)
-  toastTimer = window.setTimeout(() => (toast.value = null), 2400) as unknown as number
+  toastTimer = window.setTimeout(() => (toast.value = null), 3600) as unknown as number
 }
 
 // ── 인라인 편집 / 추가 ──
@@ -60,11 +61,11 @@ function commitEdit() {
   if (!editDraft.type) { notify('err', '구분을 입력하세요'); return }
   updateLoan(editingId.value, { ...editDraft })
   editingId.value = null
-  notify('ok', '수정되었습니다')
+  notify('ok', withBackupHint('수정되었습니다'))
 }
 function onRemove(id: string) {
   if (!window.confirm('이 대출을 삭제할까요?')) return
-  if (removeLoan(id)) notify('ok', '삭제되었습니다')
+  if (removeLoan(id)) notify('ok', withBackupHint('삭제되었습니다'))
 }
 function onAdd() {
   if (!newDraft.type || !newDraft.institution) { notify('err', '구분과 금융기관을 입력하세요'); return }
@@ -75,7 +76,7 @@ function onAdd() {
     maturityDate: new Date().toISOString().slice(0, 10), monthlyPayment: 0, status: '정상', note: ''
   })
   adding.value = false
-  notify('ok', '대출이 추가되었습니다')
+  notify('ok', withBackupHint('대출이 추가되었습니다'))
 }
 
 // ── 포맷터 ──
@@ -264,7 +265,7 @@ const rateLabelsPlugin = {
       <div
         v-if="toast"
         :class="[
-          'fixed top-6 right-6 z-50 px-4 py-2 rounded-lg shadow text-sm',
+          'fixed top-6 right-6 z-50 px-4 py-2 rounded-lg shadow text-sm whitespace-pre-line max-w-sm leading-relaxed',
           toast.kind === 'ok' ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white'
         ]"
       >{{ toast.text }}</div>

@@ -9,6 +9,7 @@ import {
   type AnniversaryView
 } from '~/composables/useAnniversaries'
 import { describeDays, formatDDay, formatMonthDay, formatYmdLong } from '~/utils/schedule'
+import { withBackupHint } from '~/utils/backupHint'
 
 useHead({ title: '기념일 관리 · 가계부 대시보드' })
 
@@ -29,7 +30,7 @@ let toastTimer: number | undefined
 function notify(kind: 'ok' | 'err', text: string) {
   toast.value = { kind, text }
   if (toastTimer) window.clearTimeout(toastTimer)
-  toastTimer = window.setTimeout(() => (toast.value = null), 2400) as unknown as number
+  toastTimer = window.setTimeout(() => (toast.value = null), 3600) as unknown as number
 }
 
 // ── 보기 방식 · 필터 ──
@@ -114,7 +115,7 @@ function onSubmit() {
     formError.value = r.reason ?? '저장에 실패했습니다'
     return
   }
-  notify('ok', editingId.value ? '기념일이 수정되었습니다' : '기념일이 추가되었습니다')
+  notify('ok', withBackupHint(editingId.value ? '기념일이 수정되었습니다' : '기념일이 추가되었습니다'))
   closeForm()
 }
 
@@ -123,7 +124,7 @@ function onRemove(v: AnniversaryView) {
   const r = removeAnniversary(v.anniversary.id)
   if (!r.ok) return notify('err', r.reason ?? '삭제에 실패했습니다')
   if (editingId.value === v.anniversary.id) closeForm()
-  notify('ok', '삭제되었습니다')
+  notify('ok', withBackupHint('삭제되었습니다'))
 }
 
 // ── 표시 도우미 ──
@@ -173,7 +174,7 @@ const MONTH_NAMES = ['1월', '2월', '3월', '4월', '5월', '6월', '7월', '8�
       <div
         v-if="toast"
         :class="[
-          'fixed top-6 right-6 z-50 px-4 py-2 rounded-lg shadow text-sm',
+          'fixed top-6 right-6 z-50 px-4 py-2 rounded-lg shadow text-sm whitespace-pre-line max-w-sm leading-relaxed',
           toast.kind === 'ok' ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white'
         ]"
       >{{ toast.text }}</div>

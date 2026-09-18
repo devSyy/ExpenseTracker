@@ -106,6 +106,8 @@ export const APP_STORAGE_KEYS = [
   // dashboard transactions (excel-loaded)
   'expense:transactions:v1',
   'expense:txMeta:v1',
+  // 거래내역 테이블 보기 설정 (컬럼 표시 여부)
+  'expense:txTableView:v1',
   // income/expense ledger
   'transactions:income-expense:v1',
   // assets
