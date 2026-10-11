@@ -4,14 +4,15 @@
 import { computed, reactive, ref } from 'vue'
 import {
   emptyAnniversaryDraft,
+  lunarDraftToSolar,
   useAnniversaries,
   type AnniversaryDraft,
   type AnniversaryView
 } from '~/composables/useAnniversaries'
-import { describeDays, formatDDay, formatMonthDay, formatYmdLong } from '~/utils/schedule'
+import { describeDays, formatDDay, formatLunar, formatMonthDay, formatYmdLong, toLunar } from '~/utils/schedule'
 import { withBackupHint } from '~/utils/backupHint'
 
-useHead({ title: '기념일 관리 · 가계부 대시보드' })
+useHead({ title: '기념일 관리 · 가계부' })
 
 const {
   views,
@@ -69,9 +70,15 @@ function openCreate() {
 
 function openEdit(v: AnniversaryView) {
   const a = v.anniversary
+  const l = toLunar(a.date)
   Object.assign(draft, {
     title: a.title,
     date: a.date,
+    calendar: a.calendar,
+    lunarYear: l?.year ?? null,
+    lunarMonth: l?.month ?? null,
+    lunarDay: l?.day ?? null,
+    lunarLeap: l?.leap ?? false,
     kind: a.kind,
     repeatYearly: a.repeatYearly,
     remindDays: a.remindDays,
@@ -95,11 +102,24 @@ function numOrNull(v: unknown): number | null {
   return Number.isFinite(n) ? n : null
 }
 
+/** 음력 입력 미리보기 — 환산된 양력 날짜 (잘못된 날짜면 null) */
+const lunarPreview = computed(() => (draft.calendar === 'lunar' ? lunarDraftToSolar(draft) : null))
+
 function onSubmit() {
   formError.value = ''
+  let date = draft.date
+  if (draft.calendar === 'lunar') {
+    const solar = lunarDraftToSolar(draft)
+    if (!solar) {
+      formError.value = '존재하지 않는 음력 날짜입니다 (연·월·일, 윤달 여부를 확인하세요)'
+      return
+    }
+    date = solar
+  }
   const payload = {
     title: draft.title,
-    date: draft.date,
+    date,
+    calendar: draft.calendar,
     kind: draft.kind,
     repeatYearly: draft.repeatYearly,
     remindDays: numOrNull(draft.remindDays),
@@ -170,11 +190,11 @@ const MONTH_NAMES = ['1월', '2월', '3월', '4월', '5월', '6월', '7월', '8�
     </div>
 
     <!-- 토스트 -->
-    <transition name="fade">
+    <transition name="toast-drop">
       <div
         v-if="toast"
         :class="[
-          'fixed top-6 right-6 z-50 px-4 py-2 rounded-lg shadow text-sm whitespace-pre-line max-w-sm leading-relaxed',
+          'fixed top-6 inset-x-0 mx-auto w-fit text-center z-50 px-4 py-2 rounded-lg shadow text-sm whitespace-pre-line max-w-sm leading-relaxed',
           toast.kind === 'ok' ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white'
         ]"
       >{{ toast.text }}</div>
@@ -217,7 +237,7 @@ const MONTH_NAMES = ['1월', '2월', '3월', '4월', '5월', '6월', '7월', '8�
         <li v-for="v in views.filter((x) => x.isSoon && !x.isPast)" :key="v.anniversary.id" class="flex flex-wrap gap-x-2">
           <b>{{ v.anniversary.title }}</b>
           <span v-if="v.anniversary.person" class="text-amber-700">· {{ v.anniversary.person }}</span>
-          <span>· {{ formatMonthDay(v.nextDate) }}</span>
+          <span>· {{ formatMonthDay(v.nextDate) }} ({{ formatLunar(v.nextDate) }})</span>
           <span class="font-semibold">({{ v.isToday ? '오늘' : formatDDay(v.daysLeft) }})</span>
           <span v-if="yearsLabel(v)" class="text-amber-700">· {{ yearsLabel(v) }}</span>
         </li>
@@ -228,19 +248,41 @@ const MONTH_NAMES = ['1월', '2월', '3월', '4월', '5월', '6월', '7월', '8�
     <section v-if="formOpen" class="card">
       <h3 class="font-semibold text-slate-900">{{ editingId ? '기념일 수정' : '새 기념일 추가' }}</h3>
       <div class="mt-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-        <div class="sm:col-span-2">
-          <label class="kpi-label">이름 *</label>
-          <input v-model="draft.title" type="text" placeholder="예: 아내 생일" class="form-input mt-1" />
-        </div>
         <div>
-          <label class="kpi-label">날짜 *</label>
+          <label class="kpi-label">달력 *</label>
+          <div class="seg mt-1" role="group" aria-label="양력/음력">
+            <button type="button" :class="['seg-btn', draft.calendar === 'solar' ? 'is-active' : '']" :aria-pressed="draft.calendar === 'solar'" @click="draft.calendar = 'solar'">양력</button>
+            <button type="button" :class="['seg-btn', draft.calendar === 'lunar' ? 'is-active' : '']" :aria-pressed="draft.calendar === 'lunar'" @click="draft.calendar = 'lunar'">음력</button>
+          </div>
+        </div>
+        <div v-if="draft.calendar === 'solar'" class="sm:col-span-2">
+          <label class="kpi-label">날짜 (양력) *</label>
           <input v-model="draft.date" type="date" class="form-input mt-1" />
+          <p class="mt-1 min-h-[1rem] text-[11px] text-slate-500">{{ formatLunar(draft.date, true) }}</p>
+        </div>
+        <div v-else class="sm:col-span-2">
+          <label class="kpi-label">날짜 (음력) *</label>
+          <div class="mt-1 grid grid-cols-[1.4fr_1fr_1fr_auto] items-center gap-1.5">
+            <input v-model.number="draft.lunarYear" type="number" min="1900" max="2100" placeholder="연" class="form-input text-right tabular-nums" />
+            <input v-model.number="draft.lunarMonth" type="number" min="1" max="12" placeholder="월" class="form-input text-right tabular-nums" />
+            <input v-model.number="draft.lunarDay" type="number" min="1" max="30" placeholder="일" class="form-input text-right tabular-nums" />
+            <label class="flex items-center gap-1 text-sm text-slate-700 select-none">
+              <input v-model="draft.lunarLeap" type="checkbox" class="rounded" /> 윤달
+            </label>
+          </div>
+          <p class="mt-1 min-h-[1rem] text-[11px] text-slate-500">
+            {{ lunarPreview ? `양력 ${formatYmdLong(lunarPreview)}` : '존재하는 음력 날짜를 입력하세요' }}
+          </p>
         </div>
         <div>
           <label class="kpi-label">종류</label>
           <select v-model="draft.kind" class="form-input mt-1">
             <option v-for="k in ANNIVERSARY_KINDS" :key="k" :value="k">{{ k }}</option>
           </select>
+        </div>
+        <div class="sm:col-span-2">
+          <label class="kpi-label">이름 *</label>
+          <input v-model="draft.title" type="text" placeholder="예: 아내 생일" class="form-input mt-1" />
         </div>
 
         <div>
@@ -335,6 +377,7 @@ const MONTH_NAMES = ['1월', '2월', '3월', '4월', '5월', '6월', '7월', '8�
               {{ v.isToday ? '오늘' : formatDDay(v.daysLeft) }}
             </div>
             <div class="ann-dday-date">{{ formatMonthDay(v.nextDate) }}</div>
+            <div class="ann-dday-date">{{ formatLunar(v.nextDate) }}</div>
           </div>
 
           <!-- 본문 -->
@@ -344,12 +387,13 @@ const MONTH_NAMES = ['1월', '2월', '3월', '4월', '5월', '6월', '7월', '8�
               <span :class="['chip', KIND_CLASS[v.anniversary.kind] ?? 'chip-default']">
                 {{ v.anniversary.kind }}
               </span>
+              <span v-if="v.anniversary.calendar === 'lunar'" class="chip chip-muted">음력</span>
               <span v-if="yearsLabel(v)" class="text-xs font-medium text-brand-600">{{ yearsLabel(v) }}</span>
               <span v-if="!v.anniversary.repeatYearly" class="text-[11px] text-slate-400">1회</span>
             </div>
             <div class="mt-0.5 text-xs text-slate-500 flex flex-wrap gap-x-2">
               <span v-if="v.anniversary.person">{{ v.anniversary.person }}</span>
-              <span>원래 날짜 {{ formatYmdLong(v.anniversary.date) }}</span>
+              <span>원래 날짜 양력 {{ formatYmdLong(v.anniversary.date) }} · {{ formatLunar(v.anniversary.date, true) }}</span>
               <span v-if="!v.isToday">{{ describeDays(v.daysLeft) }}</span>
             </div>
             <div v-if="v.anniversary.note" class="mt-0.5 text-xs text-slate-400">{{ v.anniversary.note }}</div>
@@ -378,6 +422,7 @@ const MONTH_NAMES = ['1월', '2월', '3월', '4월', '5월', '6월', '7월', '8�
                   {{ v.isToday ? '오늘' : formatDDay(v.daysLeft) }}
                 </div>
                 <div class="ann-dday-date">{{ formatMonthDay(v.nextDate) }}</div>
+                <div class="ann-dday-date">{{ formatLunar(v.nextDate) }}</div>
               </div>
               <div class="ann-body">
                 <div class="flex items-center gap-2 flex-wrap">
@@ -385,9 +430,13 @@ const MONTH_NAMES = ['1월', '2월', '3월', '4월', '5월', '6월', '7월', '8�
                   <span :class="['chip', KIND_CLASS[v.anniversary.kind] ?? 'chip-default']">
                     {{ v.anniversary.kind }}
                   </span>
-                  <span v-if="yearsLabel(v)" class="text-xs font-medium text-brand-600">{{ yearsLabel(v) }}</span>
+                  <span v-if="v.anniversary.calendar === 'lunar'" class="chip chip-muted">음력</span>
+              <span v-if="yearsLabel(v)" class="text-xs font-medium text-brand-600">{{ yearsLabel(v) }}</span>
                 </div>
                 <div v-if="v.anniversary.person" class="mt-0.5 text-xs text-slate-500">{{ v.anniversary.person }}</div>
+                <div class="mt-0.5 text-xs text-slate-500">
+                  양력 {{ formatYmdLong(v.nextDate) }} · {{ formatLunar(v.nextDate) }}
+                </div>
               </div>
               <div class="ann-actions">
                 <button type="button" class="btn-mini" @click="openEdit(v)">수정</button>
@@ -406,7 +455,7 @@ const MONTH_NAMES = ['1월', '2월', '3월', '4월', '5월', '6월', '7월', '8�
         <li><b>매년 반복</b>이 켜져 있으면 올해(또는 내년) 중 다가오는 날짜를 자동으로 계산합니다. 원래 날짜는 그대로 보관됩니다.</li>
         <li><b>N주년 / 만 N세</b>는 원래 날짜의 연도와 다음 발생 연도의 차이로 계산합니다.</li>
         <li>2월 29일은 평년에 <b>2월 28일</b>로 당겨 계산합니다 — 4년에 한 번만 보이면 목록에서 놓치기 때문입니다.</li>
-        <li>날짜는 모두 <b>양력</b> 기준입니다. 음력 기념일은 해당 연도의 양력 날짜로 등록해 주세요.</li>
+        <li>등록할 때 <b>양력/음력</b>을 고를 수 있습니다. 음력으로 등록하면 매년 <b>음력 월·일</b>에 맞춰 양력 날짜가 계산되고(윤달·30일이 없는 해는 평달·29일로 대체), 목록에는 양력과 음력이 함께 표시됩니다.</li>
         <li>이 페이지의 데이터는 브라우저(localStorage)에 저장되며, 설정 화면의 <b>백업·복원</b>에 함께 포함됩니다.</li>
       </ul>
     </section>
@@ -452,7 +501,7 @@ const MONTH_NAMES = ['1월', '2월', '3월', '4월', '5월', '6월', '7월', '8�
 .ann-row.is-past { opacity: 0.55; }
 
 .ann-dday {
-  flex: 0 0 4.75rem;
+  flex: 0 0 6.25rem;
   text-align: center;
   padding-top: 0.0625rem;
 }

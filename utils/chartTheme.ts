@@ -60,6 +60,19 @@ export const FIXED_COLOR = '#1a5eeb'       // 고정비 — brand-600
 export const VARIABLE_COLOR = '#d97706'    // 변동비 — amber-600
 
 // ─────────────────────────────────────────────────────────────
+// 목표 초과 표시색 — 의미가 고정된 경고색 (identity 슬롯과 별개)
+// 색만으로 말하지 않는다: 쓰는 곳에서 항상 "초과" 텍스트/아이콘을 함께 보여준다.
+// ─────────────────────────────────────────────────────────────
+export const OVER_COLOR = '#d03b3b'
+
+/** '#rrggbb' → 'rgba(r,g,b,a)' — 진행 중 기간처럼 같은 색의 옅은 단계가 필요할 때 */
+export function withAlpha(hex: string, alpha: number): string {
+  const h = hex.replace('#', '')
+  const n = parseInt(h.length === 3 ? h.split('').map((c) => c + c).join('') : h, 16)
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`
+}
+
+// ─────────────────────────────────────────────────────────────
 // HTML 범례 항목 — components/charts/Legend.vue가 받는 모양
 // (Chart.js 내장 범례 대신 쓰는 이유는 Legend.vue 주석 참고)
 // ─────────────────────────────────────────────────────────────

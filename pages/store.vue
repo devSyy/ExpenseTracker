@@ -1,5 +1,7 @@
 <script setup lang="ts">
+import { createId } from '~/utils/id'
 import { computed, ref, watch } from 'vue'
+import { ACCEPT_ATTR } from '~/utils/parseExcel'
 
 interface Tx { id: string; date: string; amount: number; description: string }
 
@@ -57,10 +59,6 @@ function isValidTx(x: unknown): x is Tx {
       && typeof o.description === 'string'
 }
 
-function uid() {
-  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36)
-}
-
 // ── CRUD ──
 function create(t: Omit<Tx, 'id'>): Tx | null {
   const date = (t.date || '').trim()
@@ -70,7 +68,7 @@ function create(t: Omit<Tx, 'id'>): Tx | null {
     message.value = 'date and numeric amount are required.'
     return null
   }
-  const row: Tx = { id: uid(), date, amount, description }
+  const row: Tx = { id: createId(), date, amount, description }
   txs.value = [...txs.value, row]
   message.value = `Created ${row.id}.`
   return row
@@ -145,7 +143,7 @@ function normalizeRow(r: Record<string, unknown>): Tx | null {
   const amount = toNum(amtRaw)
   if (!date || amount === null) return null
   return {
-    id: uid(),
+    id: createId(),
     date,
     amount,
     description: String(descRaw ?? '').trim()
@@ -243,7 +241,7 @@ const total = computed(() => txs.value.reduce((s, t) => s + t.amount, 0))
       <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:8px;font-size:13px">
         <label>
           <span style="color:#6b7280">Excel (one-time):</span>
-          <input type="file" accept=".xlsx,.xls,.csv" @change="onFile" />
+          <input type="file" :accept="ACCEPT_ATTR" @change="onFile" />
         </label>
         <label>
           <span style="color:#6b7280">JSON:</span>

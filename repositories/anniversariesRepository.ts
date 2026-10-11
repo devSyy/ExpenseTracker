@@ -5,12 +5,17 @@ import { createRepository } from './createRepository'
 export const ANNIVERSARY_KINDS = ['생일', '결혼기념일', '기일', '기념일', '기타'] as const
 export type AnniversaryKind = typeof ANNIVERSARY_KINDS[number]
 
+/** 기념일 기준 달력 — 양력/음력. 음력이면 매년 음력 월·일로 돌아온다 */
+export type AnniversaryCalendar = 'solar' | 'lunar'
+
 export interface Anniversary {
   id: string
   /** 기념일 이름 */
   title: string
-  /** 원래 날짜 'YYYY-MM-DD' — 생일이면 태어난 날 */
+  /** 원래 날짜 'YYYY-MM-DD'(항상 양력으로 저장) — 생일이면 태어난 날. 음력 기념일도 입력한 음력의 양력 환산값을 담는다 */
   date: string
+  /** 기준 달력. 구버전 데이터에는 없으므로 solar가 기본 */
+  calendar: AnniversaryCalendar
   kind: AnniversaryKind
   /**
    * 매년 반복 여부.
@@ -55,6 +60,7 @@ function normalizeAnniversary(raw: unknown): Anniversary | null {
     id: typeof o.id === 'string' && o.id ? o.id : `a-${Math.random().toString(36).slice(2, 10)}`,
     title,
     date,
+    calendar: o.calendar === 'lunar' ? 'lunar' : 'solar',
     kind: normalizeKind(o.kind),
     // 구버전 데이터에 필드가 없으면 '매년 반복'이 자연스러운 기본값이다
     repeatYearly: o.repeatYearly === undefined ? true : Boolean(o.repeatYearly),

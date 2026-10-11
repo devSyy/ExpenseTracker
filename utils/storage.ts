@@ -108,6 +108,8 @@ export const APP_STORAGE_KEYS = [
   'expense:txMeta:v1',
   // 거래내역 테이블 보기 설정 (컬럼 표시 여부)
   'expense:txTableView:v1',
+  // 지출 목표 (월/분기/반기/연)
+  'expense:spendingGoals:v1',
   // income/expense ledger
   'transactions:income-expense:v1',
   // assets
@@ -117,6 +119,7 @@ export const APP_STORAGE_KEYS = [
   // savings
   'savings:info:v1',
   'savings:history:v1',
+  'savings:products:v1',
   // cards
   'cards:state:v1',
   // family
@@ -124,5 +127,7 @@ export const APP_STORAGE_KEYS = [
   // contracts
   'contracts:state:v1',
   // anniversaries
-  'anniversaries:state:v1'
+  'anniversaries:state:v1',
+  // 선불 자산 (지역화폐·상품권 등) — 정의·충전 원장·카드 연결
+  'prepaid:assets:v1'
 ] as const

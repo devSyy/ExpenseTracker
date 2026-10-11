@@ -1,8 +1,8 @@
+@import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
-
-@import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
 
 :root {
   color-scheme: light;
@@ -82,3 +82,9 @@ body {
   position: relative;
   width: 100%;
 }
+
+/* 토스트 — 상단 중앙에서 내려오며 나타나고, 사라질 때는 페이드아웃 */
+.toast-drop-enter-active { transition: transform 0.3s ease-out, opacity 0.3s ease-out; }
+.toast-drop-leave-active { transition: opacity 0.5s ease; }
+.toast-drop-enter-from { opacity: 0; transform: translateY(-1.5rem); }
+.toast-drop-leave-to { opacity: 0; }

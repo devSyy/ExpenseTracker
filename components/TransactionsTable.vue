@@ -6,6 +6,8 @@
 import { computed, ref, watch } from 'vue'
 import { useExpenses, type UpdateScope } from '~/composables/useExpenses'
 import { useTaxonomies } from '~/composables/useTaxonomies'
+import { useLocalCurrency } from '~/composables/useLocalCurrency'
+import { isLocalCurrencyTx } from '~/utils/localCurrency'
 import { formatDate, formatKRW } from '~/utils/format'
 import { downloadTransactionsXlsx } from '~/utils/exportTransactions'
 import type { CostType, Transaction } from '~/utils/types'
@@ -16,8 +18,6 @@ import {
   ALL_COLUMN_KEYS,
   STATUS_FILTERS,
   compareBy,
-  duplicateKey,
-  duplicateCounts,
   tableMinWidth,
   parseAmountInput,
   inAmountRange,
@@ -35,12 +35,12 @@ const {
   excludedCount,
   excludedAmount,
   isExcluded,
-  isRefund,
+  isCategoryExcluded,
   isRefundCategory,
+  isRefundOffset,
   isNegativeAmount,
   refundCount,
   refundAmount,
-  unmatchedNegativeCount,
   setExcluded,
   setExcludedMany,
   removeTransactions,
@@ -60,8 +60,19 @@ const {
   visiblePaymentNames,
   visibleIncomeCategoryNames,
   visibleExpenseCategoryNames,
-  isIncomeCategory
+  visibleTransferCategoryNames,
+  visibleSavingsCategoryNames,
+  visibleChargeCategoryNames,
+  isChargeCategory,
+  isIncomeCategory,
+  isTransferCategory,
+  isSavingsCategory,
+  isExcludedCategory
 } = useTaxonomies()
+// 이체·저축: 수입·지출 어느 쪽 합계에도 반영되지 않는 유형
+/** 드롭다운 표시용 — 지출제외가 켜진 카테고리는 이름 뒤에 (지출제외)를 붙인다 (select 값은 그대로 이름) */
+const catLabel = (name: string) => (isExcludedCategory(name) ? `${name} (지출제외)` : name)
+const isNeutralCategory = (name: string) => isTransferCategory(name) || isSavingsCategory(name) || isChargeCategory(name)
 
 // ── 카테고리 칩 필터 (테이블 로컬, 다중 선택) ──
 // FiltersBar의 단일 선택 카테고리 필터와 별개로, 거래내역에서 빠르게 여러 카테고리를
@@ -188,26 +199,13 @@ function clearAdvanced() {
   advStatus.value = 'all'
 }
 
-// ── 중복 의심 거래 ──
-//
-// 판정 범위는 **전체 거래**다. 필터 결과 안에서만 세면 짝이 필터 밖에 있을 때
-// 중복이 안 보여서, 엑셀 중복 업로드를 잡는다는 목적을 놓친다.
-const dupCounts = computed(() => duplicateCounts(transactions.value))
-function dupCountOf(t: Transaction): number {
-  return dupCounts.value.get(duplicateKey(t)) ?? 1
-}
-function isDuplicate(t: Transaction): boolean {
-  return dupCountOf(t) > 1
-}
-
 /** 상태 필터 판정 — useExpenses의 집계 규칙과 같은 기준을 쓴다 */
 function matchesStatus(t: Transaction): boolean {
   switch (advStatus.value) {
-    case 'expense':   return !isIncomeCategory(t.category) && !isExcluded(t) && !isNegativeAmount(t)
+    case 'expense':   return !isIncomeCategory(t.category) && !isNeutralCategory(t.category) && !isExcluded(t) && !isNegativeAmount(t) && !isRefundOffset(t)
     case 'income':    return isIncomeCategory(t.category)
     case 'excluded':  return isUserExcluded(t)
     case 'negative':  return isNegativeAmount(t)
-    case 'duplicate': return isDuplicate(t)
     default:          return true
   }
 }
@@ -232,7 +230,7 @@ const advFiltered = computed<Transaction[]>(() => {
 })
 
 // ── 정렬 ──
-// 컬럼 헤더 클릭으로 토글. 같은 키 재클릭 시 방향 전환, 다른 키면 desc로 시작.
+// 컬럼 헤더 클릭으로 토글. 같은 키 재클릭 시 방향 전환, 다른 키면 문자는 asc(가나다)·날짜/금액은 desc로 시작.
 // 비교기는 utils/txTable.ts의 compareBy — 한글은 Intl.Collator로 정렬한다.
 const sortKey = ref<SortKey>('date')
 const sortDir = ref<SortDir>('desc')
@@ -242,7 +240,8 @@ function setSort(key: SortKey) {
     sortDir.value = sortDir.value === 'asc' ? 'desc' : 'asc'
   } else {
     sortKey.value = key
-    sortDir.value = 'desc'
+    // 문자 컬럼(내용·카테고리·결제수단·구분)은 가나다 순(오름차순)으로, 날짜·금액은 큰 값부터 시작
+    sortDir.value = key === 'date' || key === 'amount' ? 'desc' : 'asc'
   }
 }
 function sortIndicator(key: SortKey): string {
@@ -366,41 +365,48 @@ const COST_TYPES: CostType[] = ['고정비', '변동비']
 // ───────── 합계 푸터 ─────────
 //
 // 대상은 **현재 페이지가 아니라 조회 결과 전체**(tableFiltered)다.
-// 집계 규칙은 useExpenses의 filtered / incomeFiltered와 글자 그대로 같아야 한다.
-// 다르면 대시보드 KPI와 표 하단 숫자가 어긋나 어느 쪽을 믿어야 할지 알 수 없게 된다.
-//   지출 = 지출 카테고리 & 제외 아님 & 음수 아님
-//   수입 = 수입 카테고리 & 음수 아님
-//   제외 = 사용자가 직접 제외한 지출 거래
-//   음수/환불 = 원본 금액이 음수인 거래 (합계에 반영되지 않는다)
+//
+// 지출(headline) = 조회된 '지출 카테고리' 거래의 금액 합산
+//                  − 사용자가 '지출 제외'로 표시한 거래
+//   즉, "조회된 지출을 다 더하되, 내가 뺀 것은 제외"가 가장 자연스러운 숫자다.
+//   음수 금액(환불 거래)·환불 상계는 지출 성격이므로 그대로 포함한다. 부호 때문에
+//   자연스럽게 합계를 깎아 주므로 "실제로 쓴 돈"에 가깝게 수렴한다.
+//
+// 수입(headline) = 조회된 모든 '수입 카테고리' 거래 금액 합산.
+// 이체는 자금 이동이므로 수입·지출 어느 쪽에도 반영하지 않는다.
 const footerTotals = computed(() => {
   let expense = 0, expenseCount = 0
   let income = 0, incomeCount = 0
-  let excluded = 0, exCount = 0
-  let negative = 0, negCount = 0
+  let excluded = 0, exCount = 0      // 사용자가 '지출 제외'한 거래 (지출 합계에서 빠진다)
+  let offset = 0, offsetCount = 0    // 지출 중 환불 상계된 거래 (지출 합계에 포함된 부분)
   for (const t of tableFiltered.value) {
     const amt = Number(t.amount) || 0
-    const isIncome = isIncomeCategory(t.category)
-    if (isNegativeAmount(t)) { negative += amt; negCount++ }
-    if (isIncome) {
-      if (!isNegativeAmount(t)) { income += amt; incomeCount++ }
-    } else {
-      if (isExcluded(t)) { excluded += amt; exCount++ }
-      else if (!isNegativeAmount(t)) { expense += amt; expenseCount++ }
+    if (isNeutralCategory(t.category)) continue // 이체는 수입·지출 어느 쪽에도 반영하지 않는다
+    if (isIncomeCategory(t.category)) {
+      // 환불로 자동 제외된 수입은 수입 합계에서 빼고 '제외' 쪽으로 센다
+      if (t.autoExcludedIncome) { excluded += amt; exCount++; continue }
+      income += amt; incomeCount++
+      continue
     }
+    // 지출 카테고리
+    if (isUserExcluded(t)) {
+      // 사용자가 명시적으로 뺀 거래는 지출 합계에서 제외하고 별도 표시
+      excluded += amt; exCount++
+      continue
+    }
+    // 그 외 지출은 모두 합산 (음수 금액이면 자연히 합계를 깎는다)
+    expense += amt; expenseCount++
+    // 지출 합계에 포함된 특수 상태를 보조 통계로도 집계
+    if (isRefundOffset(t)) { offset += amt; offsetCount++ }
   }
   return {
     expense, expenseCount,
     income, incomeCount,
     excluded, exCount,
-    negative, negCount,
+    offset, offsetCount,
     net: income - expense
   }
 })
-
-/** 조회 결과 안에서 중복 의심으로 잡힌 건수 — 푸터에 경고로 띄운다 */
-const dupInViewCount = computed<number>(
-  () => tableFiltered.value.reduce((n, t) => n + (isDuplicate(t) ? 1 : 0), 0)
-)
 
 // ───────── 지출 계산 제외 ─────────
 //
@@ -416,7 +422,7 @@ const dupInViewCount = computed<number>(
  * 수입 거래는 항상 제외 상태로 고정이라 켜고 끌 대상이 아니므로 대상·상태 계산 양쪽에서 뺀다.
  * (빼지 않으면 전체 해제를 눌러도 수입 행이 계속 체크돼 있어 헤더가 영원히 indeterminate가 된다)
  */
-const togglableRows = computed(() => visible.value.filter((t) => !isIncomeCategory(t.category)))
+const togglableRows = computed(() => visible.value.filter((t) => !isIncomeCategory(t.category) && !isNeutralCategory(t.category) && !isCategoryExcluded(t)))
 
 /**
  * 사용자가 직접 제외한 지출 거래인지.
@@ -424,7 +430,7 @@ const togglableRows = computed(() => visible.value.filter((t) => !isIncomeCatego
  * "내가 뺐다"는 표시는 지출 거래에만 붙인다. (수입 행은 기존의 수입 표시를 유지)
  */
 function isUserExcluded(t: Transaction): boolean {
-  return isExcluded(t) && !isIncomeCategory(t.category)
+  return isExcluded(t) && !isIncomeCategory(t.category) && !isNeutralCategory(t.category)
 }
 /** 현재 페이지에서 전체 선택이 건드릴 수 있는 거래 id */
 const pageIds = computed<string[]>(() => togglableRows.value.map((t) => t.id))
@@ -580,6 +586,45 @@ function onChangePayment(id: string, value: string) {
     flashMsg(withBackupHint(`결제수단 '${value}' 매핑 적용 · 카테고리 → ${r.category}`))
   }
 }
+// ───────── 지역화폐 사용 ─────────
+//
+// 결제수단이 '활성 지역화폐에 연결된 카드'이고 지출 거래일 때만 체크박스를 보여준다 (이미 체크된 거래는 해제할 수 있게 계속 보인다).
+// 체크해도 원본 카드 거래(금액·카테고리·결제수단)는 그대로다 — 표시만 덧붙고, 잔액이 차감되며,
+// 카드 실적/결제수단 집계에서 분리된다. 소비 통계에는 같은 카테고리로 한 번만 잡힌다.
+const localCurrency = useLocalCurrency()
+/** 연결이 여러 개인 카드에서 체크 전에 고른 자산 (행별) */
+const lcPick = ref<Record<string, string>>({})
+
+/** 이 행에서 고를 수 있는 자산 — 새로 켤 수 있는 것 + 이미 선택된 것(꺼졌거나 연결이 풀렸어도 이름은 보여야 한다) */
+function lcOptions(t: Transaction) {
+  const opts = localCurrency.eligibleFor(t)
+  const cur = localCurrency.currentOf(t)
+  return cur && !opts.some((o) => o.id === cur.id) ? [...opts, cur] : opts
+}
+function lcSelectedId(t: Transaction): string {
+  if (isLocalCurrencyTx(t)) return t.localCurrencyId as string
+  return lcPick.value[t.id] ?? lcOptions(t)[0]?.id ?? ''
+}
+function onToggleLocalCurrency(t: Transaction, checked: boolean) {
+  const r = localCurrency.applyToTransaction(t.id, checked ? lcSelectedId(t) || null : null)
+  if (!r.ok) {
+    selectRev.value++   // 체크박스를 실제 데이터와 다시 맞춘다
+    flashMsg(`지역화폐 설정 실패: ${r.reason}`, 'err')
+    return
+  }
+  const name = r.value?.name
+  const base = checked
+    ? `${name} 사용으로 표시했습니다 — 지출 계산에서 제외되고 잔액이 차감됩니다 (1건)`
+    : '지역화폐 사용을 해제했습니다 — 지출 제외도 함께 해제했습니다 (1건)'
+  flashMsg(withBackupHint(r.value?.warning ? `${base}\n⚠ ${r.value.warning}` : base))
+}
+function onPickLocalCurrency(t: Transaction, id: string) {
+  if (!isLocalCurrencyTx(t)) { lcPick.value = { ...lcPick.value, [t.id]: id }; return }
+  const r = localCurrency.applyToTransaction(t.id, id)
+  if (!r.ok) { selectRev.value++; flashMsg(`지역화폐 변경 실패: ${r.reason}`, 'err'); return }
+  flashMsg(withBackupHint(r.value?.warning ? `${r.value.name}(으)로 변경했습니다\n⚠ ${r.value.warning}` : `${r.value?.name}(으)로 변경했습니다`))
+}
+
 function onChangeCostType(id: string, value: string) {
   if (value !== '고정비' && value !== '변동비') return
   // 같은 내용(가맹점·항목)을 가진 모든 거래의 구분을 함께 갱신
@@ -673,10 +718,25 @@ function flashMsg(msg: string, kind: 'ok' | 'err' = 'ok') {
 }
 
 function onSave() {
+  // 카테고리 변경 범위 선택창이 열린 채로 저장하면, 고른 값이 아직 데이터에 반영되지 않아
+  // 저장본에서 빠진다. '변경된 내용 모두' 저장되도록 대기 중인 변경을 먼저 이 거래 1건에만 적용한다
+  // (일괄 변경은 의도를 확인할 수 없으므로 가장 좁은 범위인 단건으로 처리).
+  let flushed = false
+  const p = pendingCategory.value
+  if (p) {
+    const fr = updateCategoryScoped(p.id, p.value, 'single')
+    pendingCategory.value = null
+    selectRev.value++
+    flushed = fr.ok && fr.updated > 0
+  }
   const r = saveToStorage()
   // 저장에 성공했을 때만 완료 알림을 띄운다. 실패는 실패대로 알려야 하므로 err 토스트.
-  if (r.ok) flashMsg(withBackupHint(`저장 완료 · ${r.count.toLocaleString('ko-KR')}건`))
-  else flashMsg(`저장 실패: ${r.reason ?? '알 수 없는 오류'}`, 'err')
+  if (r.ok) {
+    const extra = flushed ? ' · 대기 중이던 카테고리 변경 1건 포함' : ''
+    flashMsg(withBackupHint(`저장 완료 · ${r.count.toLocaleString('ko-KR')}건${extra}`))
+  } else {
+    flashMsg(`저장 실패: ${r.reason ?? '알 수 없는 오류'}`, 'err')
+  }
 }
 
 const lastSavedLabel = computed(() => {
@@ -783,17 +843,17 @@ const txCount = computed(() => transactions.value.length)
         <h3 class="font-semibold text-slate-900">거래 내역</h3>
         <p class="text-xs text-slate-500">
           필터 적용 결과 · 총 {{ total.toLocaleString('ko-KR') }}건
-          <span v-if="refundCount > 0" class="text-violet-600 font-medium">
-            · 환불 {{ refundCount.toLocaleString('ko-KR') }}건 ({{ formatKRW(refundAmount) }})
-          </span>
-          <span v-if="unmatchedNegativeCount > 0" class="text-slate-500 font-medium">
-            · 짝 없는 음수 {{ unmatchedNegativeCount.toLocaleString('ko-KR') }}건
-          </span>
-          <span v-if="excludedCount > 0" class="text-amber-600 font-medium">
-            · 지출 계산 제외 {{ excludedCount.toLocaleString('ko-KR') }}건 ({{ formatKRW(excludedAmount) }})
-          </span>
           <span class="hidden sm:inline text-slate-400">· 카테고리·결제수단·구분 셀을 직접 클릭해 변경할 수 있습니다</span>
         </p>
+        <!-- 환불 · 지출 계산 제외 요약 알약 -->
+        <div v-if="refundCount > 0 || excludedCount > 0" class="mt-2 flex flex-wrap gap-2">
+          <span v-if="refundCount > 0" class="tx-pill bg-violet-100 text-violet-800">
+            환불 {{ refundCount.toLocaleString('ko-KR') }}건 · {{ formatKRW(refundAmount) }}
+          </span>
+          <span v-if="excludedCount > 0" class="tx-pill bg-amber-100 text-amber-900">
+            지출 계산 제외 {{ excludedCount.toLocaleString('ko-KR') }}건 · {{ formatKRW(excludedAmount) }}
+          </span>
+        </div>
       </div>
       <div class="flex items-center gap-2 flex-wrap">
         <span class="hidden sm:inline text-[11px] text-slate-400 mr-1">{{ lastSavedLabel }}</span>
@@ -873,12 +933,12 @@ const txCount = computed(() => transactions.value.length)
       {{ exportError }}
     </p>
 
-    <!-- 안내 토스트 — 화면 우측 상단 고정. 표 레이아웃에 영향을 주지 않는다. -->
-    <transition name="fade">
+    <!-- 안내 토스트 — 화면 상단 중앙 고정. 표 레이아웃에 영향을 주지 않는다. -->
+    <transition name="toast-drop">
       <div
         v-if="toast"
         :class="[
-          'fixed top-6 right-6 z-50 px-4 py-2 rounded-lg shadow text-sm whitespace-pre-line max-w-sm leading-relaxed',
+          'fixed top-6 inset-x-0 mx-auto w-fit text-center z-50 px-4 py-2 rounded-lg shadow text-sm whitespace-pre-line max-w-sm leading-relaxed',
           toast.kind === 'ok' ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white'
         ]"
         role="status"
@@ -1079,7 +1139,7 @@ const txCount = computed(() => transactions.value.length)
         <div class="md:col-span-1">
           <label class="kpi-label">카테고리</label>
           <select v-model="draft.category" class="mt-1 w-full rounded-md border-slate-300 text-sm">
-            <option v-for="c in draftCategoryOptions" :key="c" :value="c">{{ c }}</option>
+            <option v-for="c in draftCategoryOptions" :key="c" :value="c">{{ catLabel(c) }}</option>
           </select>
         </div>
         <div class="md:col-span-1">
@@ -1243,6 +1303,7 @@ const txCount = computed(() => transactions.value.length)
             'border-b border-slate-100 hover:bg-slate-50/60',
             isUserExcluded(t) ? 'tx-excluded' : '',
             isNegativeAmount(t) ? 'tx-canceled' : '',
+            isLocalCurrencyTx(t) ? 'tx-lc' : '',
             isRefundCategory(t) ? 'tx-refund' : '',
             !isNegativeAmount(t) && isIncomeCategory(t.category) ? 'tx-income' : ''
           ]">
@@ -1265,6 +1326,11 @@ const txCount = computed(() => transactions.value.length)
             <td class="py-2 pr-3 text-slate-900">
               <div class="desc-cell">
                 <span class="desc-badges">
+                  <span
+                    v-if="isIncomeCategory(t.category) && t.autoExcludedIncome"
+                    class="tx-badge tx-badge-excluded"
+                    title="환불 거래라 수입 합계에서 자동 제외되었습니다"
+                  >제외</span>
                   <!-- 수입 / 지출 — 카테고리 유형 -->
                   <span
                     v-if="isIncomeCategory(t.category)"
@@ -1272,16 +1338,31 @@ const txCount = computed(() => transactions.value.length)
                     title="수입 카테고리입니다 — 지출 합계가 아니라 수입으로 집계됩니다"
                   >수입</span>
                   <span
+                    v-else-if="isTransferCategory(t.category)"
+                    class="tx-badge tx-badge-transfer"
+                    title="계좌이체입니다 — 내 통장 간 이동이라 수입·지출 어느 합계에도 반영되지 않습니다"
+                  >이체</span>
+                  <span
+                    v-else-if="isSavingsCategory(t.category)"
+                    class="tx-badge tx-badge-savings"
+                    title="저축 카테고리입니다 — 수입·지출 어느 합계에도 반영되지 않습니다"
+                  >저축</span>
+                  <span
+                    v-else-if="isChargeCategory(t.category)"
+                    class="tx-badge tx-badge-charge"
+                    title="충전 카테고리입니다 — 수입·지출 어느 합계에도 반영되지 않습니다"
+                  >충전</span>
+                  <span
                     v-else
                     class="tx-badge tx-badge-expense"
                     title="지출 카테고리입니다 — 지출 합계에 반영됩니다"
                   >지출</span>
 
-                  <!-- 환불 — 같은 금액의 결제 건과 짝이 맞은 음수 지출 -->
+                  <!-- 환불 — 현재 카테고리가 '환불'인 거래에만 붙는다 (짝이 맞은 원래 결제 행은 카테고리가 그대로라 붙지 않는다) -->
                   <span
-                    v-if="isRefund(t)"
+                    v-if="isRefundCategory(t)"
                     class="tx-badge tx-badge-canceled"
-                    title="같은 금액의 결제 건과 짝이 맞아 환불로 분류되었습니다 — 지출 합계·차트·집계에서 제외됩니다"
+                    title="카테고리가 '환불'인 거래입니다 — 지출 합계·차트·집계에서 제외됩니다"
                   >환불</span>
 
                   <!-- 지출 계산 제외 — 위 배지들과 별개로 함께 표시된다 -->
@@ -1291,16 +1372,12 @@ const txCount = computed(() => transactions.value.length)
                     title="지출 계산에서 제외된 거래입니다 (목록에는 그대로 남습니다)"
                   >제외</span>
 
-                  <!--
-                    중복 의심 — 날짜·금액·내용이 완전히 같은 거래가 2건 이상.
-                    판정은 전체 거래 기준이라 짝이 지금 필터 밖에 있어도 표시된다.
-                    자동으로 지우지 않는다(같은 가게에서 같은 금액을 두 번 쓴 정상 거래일 수 있다).
-                  -->
+                  <!-- 지역화폐 사용 — 카드 소비가 아니라 선불 자산에서 쓴 돈 (원본 카드 거래는 그대로) -->
                   <span
-                    v-if="isDuplicate(t)"
-                    class="tx-badge tx-badge-dup"
-                    :title="`날짜·금액·내용이 같은 거래가 전체 ${dupCountOf(t)}건 있습니다. 엑셀을 두 번 올렸을 수 있으니 확인해 보세요 — 정상 거래일 수도 있으므로 자동으로 지우지 않습니다.`"
-                  >중복 {{ dupCountOf(t) }}</span>
+                    v-if="isLocalCurrencyTx(t)"
+                    class="tx-badge tx-badge-lc"
+                    :title="`${localCurrency.currentOf(t)?.name ?? '지역화폐'}에서 쓴 돈입니다 — 카드 실적·결제수단 집계에서는 빠지고, 지출 통계에는 한 번만 반영됩니다`"
+                  >{{ localCurrency.currentOf(t)?.name ?? '지역화폐' }}</span>
                 </span>
                 <span class="desc-text" :title="t.description">{{ t.description }}</span>
               </div>
@@ -1318,13 +1395,22 @@ const txCount = computed(() => transactions.value.length)
                 @change="onChangeCategory(t.id, ($event.target as HTMLSelectElement).value)"
               >
                 <option v-if="!visibleCategoryNames.includes(t.category)" :value="t.category">
-                  {{ t.category }} (숨김/외부)
+                  {{ catLabel(t.category) }} (숨김/외부)
                 </option>
                 <optgroup label="지출">
-                  <option v-for="c in visibleExpenseCategoryNames" :key="`e-${c}`" :value="c">{{ c }}</option>
+                  <option v-for="c in visibleExpenseCategoryNames" :key="`e-${c}`" :value="c">{{ catLabel(c) }}</option>
                 </optgroup>
                 <optgroup v-if="visibleIncomeCategoryNames.length > 0" label="수입">
-                  <option v-for="c in visibleIncomeCategoryNames" :key="`i-${c}`" :value="c">{{ c }}</option>
+                  <option v-for="c in visibleIncomeCategoryNames" :key="`i-${c}`" :value="c">{{ catLabel(c) }}</option>
+                </optgroup>
+                <optgroup v-if="visibleTransferCategoryNames.length > 0" label="이체">
+                  <option v-for="c in visibleTransferCategoryNames" :key="`t-${c}`" :value="c">{{ catLabel(c) }}</option>
+                </optgroup>
+                <optgroup v-if="visibleSavingsCategoryNames.length > 0" label="저축">
+                  <option v-for="c in visibleSavingsCategoryNames" :key="`s-${c}`" :value="c">{{ catLabel(c) }}</option>
+                </optgroup>
+                <optgroup v-if="visibleChargeCategoryNames.length > 0" label="충전">
+                  <option v-for="c in visibleChargeCategoryNames" :key="`c-${c}`" :value="c">{{ catLabel(c) }}</option>
                 </optgroup>
               </select>
             </td>
@@ -1341,6 +1427,30 @@ const txCount = computed(() => transactions.value.length)
                 </option>
                 <option v-for="p in visiblePaymentNames" :key="p" :value="p">{{ p }}</option>
               </select>
+              <!-- 지역화폐 사용: 활성 지역화폐에 연결된 카드의 지출 거래에만 나타난다. 연결이 여럿이면 선택 목록을 준다. -->
+              <div v-if="localCurrency.showControl(t)" class="lc-cell">
+                <label class="lc-check" :title="isLocalCurrencyTx(t) ? '지역화폐 사용 해제 — 카드 소비로 되돌립니다' : '이 거래를 지역화폐로 결제한 것으로 표시 — 카드 소비에서 분리하고 잔액을 차감합니다'">
+                  <input
+                    type="checkbox"
+                    :key="`${t.id}:lc:${selectRev}`"
+                    :checked="isLocalCurrencyTx(t)"
+                    :aria-label="`${t.description} 지역화폐 사용`"
+                    @change="onToggleLocalCurrency(t, ($event.target as HTMLInputElement).checked)"
+                  />
+                  <span>지역화폐 사용</span>
+                </label>
+                <select
+                  v-if="lcOptions(t).length > 1"
+                  class="lc-select"
+                  :key="`${t.id}:lcs:${selectRev}`"
+                  :value="lcSelectedId(t)"
+                  :aria-label="`${t.description} 지역화폐 선택`"
+                  @change="onPickLocalCurrency(t, ($event.target as HTMLSelectElement).value)"
+                >
+                  <option v-for="o in lcOptions(t)" :key="o.id" :value="o.id">{{ o.name }}</option>
+                </select>
+                <span v-else-if="lcOptions(t)[0]" class="lc-name">{{ lcOptions(t)[0]!.name }}</span>
+              </div>
             </td>
 
             <!-- 구분: 인라인 select (고정비/변동비 색상 유지) -->
@@ -1359,7 +1469,7 @@ const txCount = computed(() => transactions.value.length)
 
             <td class="py-2 pr-3 text-right tabular-nums font-medium text-slate-900 whitespace-nowrap">
               <!-- 취소 거래는 원본 금액(음수)을 그대로 보여준다 -->
-              <span v-if="isNegativeAmount(t)" :title="isRefund(t) ? '환불 — 원본 금액(음수)' : '원본 금액(음수)'">-{{ formatKRW(t.amount) }}</span>
+              <span v-if="isNegativeAmount(t)" :title="isRefundCategory(t) ? '환불 — 원본 금액(음수)' : '원본 금액(음수)'">-{{ formatKRW(t.amount) }}</span>
               <span v-else>{{ formatKRW(t.amount) }}</span>
             </td>
 
@@ -1370,11 +1480,15 @@ const txCount = computed(() => transactions.value.length)
                 class="exclude-check"
                 :key="`${t.id}:ex:${selectRev}`"
                 :checked="isExcluded(t)"
-                :disabled="isIncomeCategory(t.category)"
+                :disabled="isIncomeCategory(t.category) || isNeutralCategory(t.category) || isCategoryExcluded(t)"
                 :aria-label="`${t.description} 지출 계산에서 제외`"
                 :title="isIncomeCategory(t.category)
                   ? '수입 거래는 항상 지출 계산에서 제외됩니다 (해제할 수 없습니다)'
-                  : (isExcluded(t) ? '지출 계산에 다시 포함하기' : '이 거래만 지출 계산에서 제외하기')"
+                  : isNeutralCategory(t.category)
+                    ? '이체·저축·충전은 지출 계산에 포함되지 않습니다'
+                    : isCategoryExcluded(t)
+                      ? '카테고리 설정(지출제외)으로 제외됩니다 — 설정에서 해제할 수 있습니다'
+                      : (isExcluded(t) ? '지출 계산에 다시 포함하기' : '이 거래만 지출 계산에서 제외하기')"
                 @change="onToggleExcluded(t.id, ($event.target as HTMLInputElement).checked)"
               />
             </td>
@@ -1433,30 +1547,28 @@ const txCount = computed(() => transactions.value.length)
         <tfoot v-if="total > 0" class="tx-foot">
           <tr>
             <td :colspan="columnCount" class="py-2.5 px-2">
-              <div class="foot-wrap">
-                <span class="foot-scope">조회 결과 {{ total.toLocaleString('ko-KR') }}건 합계</span>
-                <span class="foot-item foot-expense" title="지출 카테고리 · 제외 아님 · 음수 아님">
-                  지출 <b>{{ formatKRW(footerTotals.expense) }}</b>
-                  <i>{{ footerTotals.expenseCount.toLocaleString('ko-KR') }}건</i>
-                </span>
-                <span v-if="footerTotals.incomeCount > 0" class="foot-item foot-income" title="수입 카테고리 거래">
-                  수입 <b>{{ formatKRW(footerTotals.income) }}</b>
-                  <i>{{ footerTotals.incomeCount.toLocaleString('ko-KR') }}건</i>
-                </span>
-                <span v-if="footerTotals.incomeCount > 0" class="foot-item foot-net" title="수입 − 지출">
-                  순액 <b>{{ footerTotals.net < 0 ? '-' : '' }}{{ formatKRW(Math.abs(footerTotals.net)) }}</b>
-                </span>
-                <span v-if="footerTotals.exCount > 0" class="foot-item foot-excluded" title="직접 제외해 지출 합계에 빠진 금액">
-                  제외 <b>{{ formatKRW(footerTotals.excluded) }}</b>
-                  <i>{{ footerTotals.exCount.toLocaleString('ko-KR') }}건</i>
-                </span>
-                <span v-if="footerTotals.negCount > 0" class="foot-item foot-negative" title="원본 금액이 음수인 거래 — 합계에 반영되지 않습니다">
-                  음수/환불 <b>-{{ formatKRW(Math.abs(footerTotals.negative)) }}</b>
-                  <i>{{ footerTotals.negCount.toLocaleString('ko-KR') }}건</i>
-                </span>
-                <span v-if="dupInViewCount > 0" class="foot-item foot-dup" title="날짜·금액·내용이 같은 거래 — 엑셀 중복 업로드일 수 있습니다">
-                  중복 의심 <b>{{ dupInViewCount.toLocaleString('ko-KR') }}건</b>
-                </span>
+              <div class="foot-scope mb-2">조회 결과 {{ total.toLocaleString('ko-KR') }}건 합계</div>
+              <div class="foot-grid">
+                <div class="foot-tile bg-orange-50 text-orange-900" title="조회된 '지출 카테고리' 거래의 금액 합산 (지출 제외 항목은 빠짐 · 음수/환불은 금액 그대로 반영)">
+                  <span>지출 · {{ footerTotals.expenseCount.toLocaleString('ko-KR') }}건</span>
+                  <b>{{ formatKRW(footerTotals.expense) }}</b>
+                </div>
+                <div v-if="footerTotals.incomeCount > 0" class="foot-tile bg-blue-50 text-blue-900" title="조회된 모든 '수입 카테고리' 거래 합계">
+                  <span>수입 · {{ footerTotals.incomeCount.toLocaleString('ko-KR') }}건</span>
+                  <b>{{ formatKRW(footerTotals.income) }}</b>
+                </div>
+                <div v-if="footerTotals.incomeCount > 0" class="foot-tile bg-[#101826] text-slate-300" title="수입 − 지출">
+                  <span>순액</span>
+                  <b :class="footerTotals.net < 0 ? 'text-orange-300' : 'text-emerald-300'">{{ footerTotals.net < 0 ? '-' : '' }}{{ formatKRW(Math.abs(footerTotals.net)) }}</b>
+                </div>
+                <div v-if="footerTotals.exCount > 0" class="foot-tile bg-amber-50 text-amber-900" title="사용자가 '지출 제외'로 표시해 지출 합계에서 빠진 금액">
+                  <span>제외 · {{ footerTotals.exCount.toLocaleString('ko-KR') }}건</span>
+                  <b>{{ formatKRW(footerTotals.excluded) }}</b>
+                </div>
+                <div v-if="footerTotals.offsetCount > 0" class="foot-tile bg-violet-50 text-violet-900" title="지출 합계에 포함된 금액 중, 환불로 상계된 결제·환불 입금의 부분">
+                  <span>환불 상계분 · {{ footerTotals.offsetCount.toLocaleString('ko-KR') }}건</span>
+                  <b>{{ formatKRW(footerTotals.offset) }}</b>
+                </div>
               </div>
             </td>
           </tr>
@@ -1738,49 +1850,36 @@ const txCount = computed(() => transactions.value.length)
  * 갈려서, 셀에 걸어야 .tx-card-body 스크롤 중에도 합계가 바닥에 붙어 있는다.
  */
 .tx-foot td {
-  position: sticky;
-  bottom: 0;
-  z-index: 5;
-  background: rgb(248 250 252);
+  background: #fff;
   border-top: 2px solid rgb(226 232 240);
-}
-.foot-wrap {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  flex-wrap: wrap;
-  font-size: 11.5px;
 }
 .foot-scope {
   color: rgb(100 116 139);
+  font-size: 11.5px;
   font-weight: 600;
   white-space: nowrap;
 }
-.foot-item {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 4px;
-  color: rgb(71 85 105);
+.foot-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+.foot-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-radius: 14px;
+  padding: 12px 16px;
+}
+.foot-tile span { font-size: 12px; }
+.foot-tile b { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.tx-pill {
+  display: inline-block;
+  font-size: 12.5px;
+  font-weight: 700;
+  padding: 3px 12px;
+  border-radius: 9999px;
   white-space: nowrap;
-}
-.foot-item b { font-variant-numeric: tabular-nums; font-weight: 700; }
-.foot-item i {
-  font-style: normal;
-  font-size: 10.5px;
-  color: rgb(148 163 184);
-  font-variant-numeric: tabular-nums;
-}
-.foot-expense b  { color: rgb(15 23 42); }
-.foot-income b   { color: rgb(5 150 105); }
-.foot-net b      { color: rgb(37 99 235); }
-.foot-excluded b { color: rgb(180 83 9); }
-.foot-negative b { color: rgb(124 58 237); }
-.foot-dup b      { color: rgb(219 39 119); }
-
-/* 중복 의심 배지 */
-.tx-badge-dup {
-  background: rgb(252 231 243);
-  color: rgb(157 23 77);
 }
 
 /* 카테고리 칩 필터 */
@@ -2045,6 +2144,18 @@ const txCount = computed(() => transactions.value.length)
   background: rgb(219 234 254);
   color: rgb(29 78 216);
 }
+.tx-badge-transfer {
+  background: rgb(237 233 254);
+  color: rgb(109 40 217);
+}
+.tx-badge-savings {
+  background: rgb(204 251 241);
+  color: rgb(15 118 110);
+}
+.tx-badge-charge {
+  background: rgb(224 242 254);
+  color: rgb(3 105 161);
+}
 /* 지출은 대부분의 행에 붙으므로 눈에 띄지 않게 — 유형은 알 수 있되 시선을 끌지 않는다 */
 .tx-badge-expense {
   background: rgb(241 245 249);
@@ -2055,6 +2166,41 @@ const txCount = computed(() => transactions.value.length)
   background: rgb(254 243 199);
   color: rgb(146 64 14);
 }
+.tx-badge-lc {
+  background: rgb(204 251 241);
+  color: rgb(15 118 110);
+}
+.lc-cell {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: rgb(15 118 110);
+}
+.lc-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+}
+.lc-check input { accent-color: rgb(13 148 136); }
+.lc-select {
+  min-width: 0;
+  max-width: 100%;
+  padding: 0 4px;
+  height: 22px;
+  font-size: 11px;
+  border: 1px solid rgb(153 246 228);
+  border-radius: 6px;
+  background: #fff;
+  color: rgb(15 118 110);
+}
+.lc-name { font-weight: 600; }
+.tx-lc td:first-of-type { box-shadow: inset 2px 0 0 rgb(20 184 166); }
 .tx-badge-canceled {
   background: rgb(237 233 254);
   color: rgb(109 40 217);

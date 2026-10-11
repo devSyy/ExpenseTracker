@@ -28,8 +28,27 @@ export default defineNuxtConfig({
      */
     baseURL: process.env.NUXT_APP_BASE_URL || '/',
     head: {
-      title: '가계부 대시보드',
+      title: '가계부',
       htmlAttrs: { lang: 'ko' },
+      // 파비콘은 public/favicon.svg — AppLogo.vue 와 같은 마크다.
+      // baseURL 이 붙어야 Pages 하위 경로에서도 잡히므로 app.baseURL 값을 앞에 붙인다.
+      link: [
+        {
+          rel: 'icon',
+          type: 'image/svg+xml',
+          href: `${process.env.NUXT_APP_BASE_URL || '/'}favicon.svg`
+        }
+      ],
+      // Google Analytics (gtag.js)
+      script: [
+        { src: 'https://www.googletagmanager.com/gtag/js?id=G-MV0LGVBHMB', async: true },
+        {
+          innerHTML: `window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-MV0LGVBHMB');`
+        }
+      ],
       meta: [
         { charset: 'utf-8' },
         { name: 'viewport', content: 'width=device-width, initial-scale=1' },

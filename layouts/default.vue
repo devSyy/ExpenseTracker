@@ -7,12 +7,68 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useIncomeExpense } from '~/composables/useIncomeExpense'
 import { useExpenses } from '~/composables/useExpenses'
 import { useFamily } from '~/composables/useFamily'
+import { downloadBackup } from '~/utils/backup'
+import { withBackupHint } from '~/utils/backupHint'
 
 // 수입/지출 관리 ↔ 대시보드 미러링 감시자는 useIncomeExpense 모듈을 불러오는 시점에 등록된다.
 // 어느 페이지로 진입하든 미러링이 살아 있도록 레이아웃에서 한 번 호출해 둔다.
 useIncomeExpense()
 
-const { monthSummary } = useExpenses()
+const { monthSummary, exportSnapshot, saveToStorage, unsavedChanges } = useExpenses()
+
+// ── 전체 데이터 백업 (사이드바) ──
+// 클릭하면 ① 저장하지 않은 거래 편집을 저장소에 저장하고(거래내역의 '저장' 버튼과 같은 saveToStorage)
+// ② 현재 메모리 상태를 JSON으로 내려받는다(설정 > 백업·복원의 내보내기와 같은 exportSnapshot).
+// 저장에 실패해도(용량 초과·시크릿 모드) 백업 파일은 그대로 내려받고, 그 사실만 라벨로 알린다.
+const backupState = ref<'idle' | 'done' | 'saveFailed' | 'error'>('idle')
+let backupTimer: ReturnType<typeof setTimeout> | undefined
+function onQuickBackup() {
+  try {
+    // 저장할 변경이 있을 때만 저장한다 — 변경이 없으면 저장소를 다시 쓸 이유가 없다
+    const saved = unsavedChanges.value ? saveToStorage() : { ok: true }
+    downloadBackup(undefined, exportSnapshot())
+    backupState.value = saved.ok ? 'done' : 'saveFailed'
+  } catch {
+    backupState.value = 'error'
+  }
+  if (backupTimer) clearTimeout(backupTimer)
+  backupTimer = setTimeout(() => (backupState.value = 'idle'), 2400)
+}
+onBeforeUnmount(() => { if (backupTimer) clearTimeout(backupTimer) })
+
+// ── 메뉴 이동 시 자동 저장 + 알림 ──
+// 거래는 명시 저장(autoPersist:false)이라 저장 버튼을 안 누르고 다른 메뉴로 가면 편집이 메모리에만 남는다.
+// 라우트가 바뀌는 순간(beforeEach)에 미저장 변경이 있으면 거래내역의 '저장'과 같은 saveToStorage()로 저장한다.
+// 편집 즉시 저장(autoPersist)으로 바꾸는 게 아니라 "이동 시점 저장"이다.
+// 변경이 없으면 저장소를 다시 쓰지 않는다 (빈 메모리로 저장된 데이터를 덮어쓰는 사고 방지).
+const router = useRouter()
+const navToast = ref<{ kind: 'ok' | 'err'; text: string } | null>(null)
+let navToastTimer: ReturnType<typeof setTimeout> | undefined
+function showNavToast(kind: 'ok' | 'err', text: string) {
+  navToast.value = { kind, text }
+  if (navToastTimer) clearTimeout(navToastTimer)
+  navToastTimer = setTimeout(() => (navToast.value = null), 3000)
+}
+const removeSaveGuard = router.beforeEach((to, from) => {
+  if (!from.matched.length || to.path === from.path) return // 최초 진입·같은 메뉴 재클릭은 제외
+  try {
+    if (!unsavedChanges.value) {
+      showNavToast('ok', '저장된 상태입니다 (변경 사항 없음)')
+      return
+    }
+    const r = saveToStorage()
+    if (r.ok) {
+      const text = `자동 저장되었습니다 (거래 ${r.count.toLocaleString('ko-KR')}건)`
+      showNavToast('ok', to.path === '/settings' ? text : withBackupHint(text))
+    } else {
+      showNavToast('err', `자동 저장 실패${r.reason ? `: ${r.reason}` : ''}`)
+    }
+  } catch (e) {
+    showNavToast('err', `자동 저장 실패: ${(e as Error).message}`)
+  }
+  // 저장 결과와 무관하게 이동은 막지 않는다
+})
+onBeforeUnmount(() => { removeSaveGuard(); if (navToastTimer) clearTimeout(navToastTimer) })
 const {
   familyName,
   setFamilyName,
@@ -141,6 +197,21 @@ const navSub = 'block px-3 py-1.5 rounded-md text-xs text-slate-500 hover:text-s
 
 <template>
   <div class="min-h-screen flex bg-slate-50">
+    <!-- 화면 정중앙 최상단/최하단 반투명 이동 버튼 -->
+    <ScrollEdgeButtons />
+
+    <!-- 메뉴 이동 자동 저장 알림 -->
+    <transition name="toast-drop">
+      <div
+        v-if="navToast"
+        role="status"
+        :class="[
+          'fixed top-6 inset-x-0 mx-auto w-fit text-center z-50 px-4 py-2 rounded-lg shadow text-sm whitespace-pre-line max-w-sm leading-relaxed',
+          navToast.kind === 'ok' ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white'
+        ]"
+      >{{ navToast.text }}</div>
+    </transition>
+
     <!-- 사이드바 -->
     <!-- 모바일: 슬라이드 오버레이 / 데스크톱: sticky + 폭 토글 -->
     <aside
@@ -153,7 +224,7 @@ const navSub = 'block px-3 py-1.5 rounded-md text-xs text-slate-500 hover:text-s
       <!-- 로고 + 가족 이름 -->
       <div class="px-4 py-4 flex items-center gap-2.5">
         <div class="w-9 h-9 flex-shrink-0 rounded-xl bg-brand-600 text-white grid place-items-center">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/></svg>
+          <AppLogo :size="20" />
         </div>
         <div class="leading-tight collapsible-text min-w-0">
           <div class="text-[10px] font-medium text-slate-400 tracking-wide">FAMILY</div>
@@ -283,6 +354,11 @@ const navSub = 'block px-3 py-1.5 rounded-md text-xs text-slate-500 hover:text-s
           <span class="collapsible-text">수입/지출</span>
         </NuxtLink>
 
+        <NuxtLink to="/spending-goals" :class="navItem" active-class="bg-brand-50 text-brand-700 font-semibold" title="지출 목표/추이">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="flex-shrink-0"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5"/></svg>
+          <span class="collapsible-text">지출 목표/추이</span>
+        </NuxtLink>
+
         <span :class="navItemDisabled" title="통계 (준비 중)">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="flex-shrink-0"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg>
           <span class="collapsible-text">통계</span>
@@ -314,10 +390,10 @@ const navSub = 'block px-3 py-1.5 rounded-md text-xs text-slate-500 hover:text-s
           </div>
         </div>
 
-        <span :class="[navItemDisabled, 'mt-2']" title="예산 (준비 중)">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="flex-shrink-0"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-          <span class="collapsible-text">예산</span>
-        </span>
+        <NuxtLink to="/guide" :class="[navItem, 'mt-2']" active-class="bg-brand-50 text-brand-700 font-semibold" title="사용법">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="flex-shrink-0"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+          <span class="collapsible-text">사용법</span>
+        </NuxtLink>
 
         <span :class="navItemDisabled" title="보고서 (준비 중)">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="flex-shrink-0"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg>
@@ -328,6 +404,23 @@ const navSub = 'block px-3 py-1.5 rounded-md text-xs text-slate-500 hover:text-s
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="flex-shrink-0"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.31.07.62.21.91.42l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82z"/></svg>
           <span class="collapsible-text">설정</span>
         </NuxtLink>
+
+        <!-- 전체 데이터 백업 — 데이터가 브라우저에만 있으므로 가장 눈에 띄는 버튼으로 분리 배치 -->
+        <div class="mt-3 pt-3 border-t border-slate-200">
+          <button
+            type="button"
+            :class="[
+              'backup-btn flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-semibold w-full text-left text-white shadow-sm transition-colors',
+              backupState === 'saveFailed' ? 'bg-amber-600 hover:bg-amber-700' : backupState === 'error' ? 'bg-rose-600 hover:bg-rose-700' : 'bg-emerald-600 hover:bg-emerald-700'
+            ]"
+            title="전체 데이터 백업 — 저장하지 않은 거래 편집을 저장한 뒤, 현재 화면의 모든 데이터를 JSON 파일로 내려받습니다"
+            @click="onQuickBackup"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="flex-shrink-0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            <span class="collapsible-text">{{ backupState === 'done' ? '저장·백업 완료' : backupState === 'saveFailed' ? '백업 완료 (저장 실패)' : backupState === 'error' ? '백업 실패' : '전체 데이터 백업' }}</span>
+          </button>
+          <p class="collapsible-section mt-1 px-1 text-[10px] leading-tight text-slate-400">데이터는 이 브라우저에만 저장됩니다. JSON 파일을 따로 보관하세요.</p>
+        </div>
       </nav>
 
       <!-- 이번 달 요약 -->
@@ -360,18 +453,38 @@ const navSub = 'block px-3 py-1.5 rounded-md text-xs text-slate-500 hover:text-s
 
     <!-- 본문 -->
     <main class="flex-1 min-w-0">
-      <!-- 모바일 햄버거 -->
-      <button
-        type="button"
-        class="md:hidden m-3 p-2 rounded-md border border-slate-300 bg-white text-slate-700"
-        aria-label="메뉴 열기"
-        @click="sidebarOpen = !sidebarOpen"
-      >
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
-      </button>
+      <!--
+        모바일 상단 바 (md 미만 전용).
+
+        데스크톱에서는 사이드바 상단에 로고·가족 이름이 늘 보이지만, 모바일에서는
+        사이드바가 오버레이라 닫혀 있는 동안 앱 제목이 어디에도 없었다. 햄버거 버튼만
+        덩그러니 있어서 "여기가 무슨 화면인지" 알 수 없다.
+
+        스크롤해도 따라오도록 sticky로 고정한다. z-index는 10 — 사이드바(30)와
+        오버레이(20)보다 낮아서, 메뉴를 열면 이 바가 오버레이에 덮인다.
+       -->
+      <header class="mobile-topbar md:hidden">
+        <button
+          type="button"
+          class="topbar-menu-btn"
+          aria-label="메뉴 열기"
+          @click="sidebarOpen = !sidebarOpen"
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+        </button>
+
+        <div class="topbar-logo">
+          <AppLogo :size="17" />
+        </div>
+
+        <div class="topbar-title">
+          <span class="topbar-app">가계부</span>
+          <span class="topbar-family">{{ familyName }}</span>
+        </div>
+      </header>
       <slot />
       <footer class="px-fluid-6 pb-6 pt-2 text-xs text-slate-400 flex justify-between flex-wrap gap-2">
-        <span>© {{ new Date().getFullYear() }} 가계부 대시보드</span>
+        <span>© {{ new Date().getFullYear() }} 가계부</span>
         <span>파일은 브라우저에서만 처리되며 서버로 전송되지 않습니다.</span>
       </footer>
     </main>
@@ -379,6 +492,76 @@ const navSub = 'block px-3 py-1.5 rounded-md text-xs text-slate-500 hover:text-s
 </template>
 
 <style scoped>
+/* ─────────────────────────────────────────
+ * 모바일 상단 바
+ *
+ * 앱 제목을 화면 최상단에 항상 노출한다. 사이드바가 닫혀 있어도 보인다.
+ * sticky라 목록을 길게 스크롤해도 따라온다.
+ * ───────────────────────────────────────── */
+.mobile-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: #fff;
+  border-bottom: 1px solid rgb(226 232 240);
+  /* 스크롤된 본문이 바 아래로 비쳐 보이지 않도록 살짝 띄운다 */
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+.topbar-menu-btn {
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgb(203 213 225);
+  border-radius: 8px;
+  background: #fff;
+  color: rgb(51 65 85);
+  cursor: pointer;
+}
+.topbar-menu-btn:active { background: rgb(241 245 249); }
+.topbar-logo {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 9px;
+  background: rgb(37 99 235);
+  color: #fff;
+}
+/* 제목 묶음 — 폭이 모자라면 말줄임되고, 로고·버튼은 줄지 않는다 */
+.topbar-title {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  overflow: hidden;
+}
+.topbar-app {
+  font-size: 15px;
+  font-weight: 700;
+  color: rgb(15 23 42);
+  white-space: nowrap;
+}
+/* 활성 가족 — 모바일에선 사이드바가 닫혀 있어 어느 가족 데이터인지 알 수 없다 */
+.topbar-family {
+  min-width: 0;
+  font-size: 11.5px;
+  color: rgb(100 116 139);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 아주 좁은 화면(360px 이하)에서는 가족 이름을 접어 제목을 지킨다 */
+@media (max-width: 360px) {
+  .topbar-family { display: none; }
+}
+
 /* ─────────────────────────────────────────
  * 사이드바 베이스
  * 모바일: 절대 위치 슬라이드 / 데스크톱: sticky + 폭 트랜지션
@@ -415,6 +598,10 @@ const navSub = 'block px-3 py-1.5 rounded-md text-xs text-slate-500 hover:text-s
   }
   .sidebar-collapsed nav a,
   .sidebar-collapsed nav span {
+    justify-content: center;
+    padding-inline: 0.5rem;
+  }
+  .sidebar-collapsed nav .backup-btn {
     justify-content: center;
     padding-inline: 0.5rem;
   }

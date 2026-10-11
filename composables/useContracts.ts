@@ -1,6 +1,7 @@
 // 계약 관리 컴포저블 — Repository 위에 CRUD와 날짜 파생 정보를 얹은 레이어.
 // 영속화/검증은 repositories/contractsRepository가 담당한다.
 import { computed } from 'vue'
+import type { MutationResult } from '~/utils/types'
 import {
   contractsRepo,
   CONTRACT_CYCLES,
@@ -137,12 +138,6 @@ export interface ContractInput {
   noticeDays?: number | null
   terminated?: boolean
   note?: string
-}
-
-export interface MutationResult {
-  ok: boolean
-  id?: string
-  reason?: string
 }
 
 function validate(input: ContractInput): string | null {

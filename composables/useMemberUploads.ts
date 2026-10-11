@@ -11,7 +11,7 @@
 import { computed, reactive } from 'vue'
 import { joinURL } from 'ufo'
 import { tryUseNuxtApp } from '#app'
-import { parseExpenseFile, isSupportedFileName, SUPPORTED_EXTENSIONS } from '~/utils/parseExcel'
+import { parseExpenseFile, isSupportedFileName, SUPPORTED_EXTENSIONS, ACCEPT_ATTR } from '~/utils/parseExcel'
 import { applyPaymentMappings, useExpenses, type MemberSaveResult, type SaveMode } from '~/composables/useExpenses'
 import { useFamily } from '~/composables/useFamily'
 import { useTaxonomies } from '~/composables/useTaxonomies'
@@ -57,8 +57,6 @@ export interface MemberUpload {
   savedAt: Date | null
   savedCount: number
 }
-
-export const ACCEPT_ATTR = SUPPORTED_EXTENSIONS.join(',')
 
 /** memberId → 임시 업로드 상태 */
 const uploads = reactive<Record<string, MemberUpload>>({})

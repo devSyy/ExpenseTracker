@@ -65,13 +65,22 @@ export interface PaymentRow {
   share: number
 }
 
-export function bucketByPayment(tx: Transaction[]): PaymentRow[] {
+/**
+ * 결제수단별 집계.
+ * labelOf를 넘기면 거래마다 집계 키를 바꿀 수 있다 — 지역화폐 사용 거래를 카드가 아니라
+ * 해당 지역화폐 이름으로 묶어 카드 소비와 구분하기 위한 확장점이다 (생략하면 기존과 동일: 결제수단 이름).
+ */
+export function bucketByPayment(
+  tx: Transaction[],
+  labelOf: (t: Transaction) => string = (t) => t.paymentMethod
+): PaymentRow[] {
   const totals = new Map<PaymentMethod, { total: number; count: number }>()
   for (const t of tx) {
-    const b = totals.get(t.paymentMethod) ?? { total: 0, count: 0 }
+    const key = labelOf(t)
+    const b = totals.get(key) ?? { total: 0, count: 0 }
     b.total += t.amount
     b.count += 1
-    totals.set(t.paymentMethod, b)
+    totals.set(key, b)
   }
   const grand = tx.reduce((s, t) => s + t.amount, 0) || 1
   return Array.from(totals.entries())
@@ -123,23 +132,16 @@ export interface SavingsSummary {
 }
 
 export function computeSavings(
-  tx: Transaction[],
-  isSavingsPayment: (paymentMethod: PaymentMethod) => boolean
+  savingsTx: Transaction[],
+  rangeMonthLabels: Iterable<string>
 ): SavingsSummary {
   let total = 0
-  let count = 0
-  const monthsWithSavings = new Set<string>()
-  for (const t of tx) {
-    if (!isSavingsPayment(t.paymentMethod)) continue
-    total += Number(t.amount) || 0
-    count += 1
-    monthsWithSavings.add(t.monthLabel)
-  }
+  for (const t of savingsTx) total += Number(t.amount) || 0
   // 월 환산의 분모는 **전체 필터 범위의 개월 수**다.
   // 저축이 있었던 달만 세면 "한 달만 저축해도 월 저축액이 그 금액"이 되어 과대평가된다.
-  const allMonths = new Set(tx.map((t) => t.monthLabel))
+  const allMonths = new Set(rangeMonthLabels)
   const months = allMonths.size || 1
-  return { total, monthly: total / months, count, months: allMonths.size }
+  return { total, monthly: total / months, count: savingsTx.length, months: allMonths.size }
 }
 
 export interface KPISummary {

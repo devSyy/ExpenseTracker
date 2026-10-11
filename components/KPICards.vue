@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { useExpenses } from '~/composables/useExpenses'
 import { useTaxonomies } from '~/composables/useTaxonomies'
 import { computeKPIs } from '~/utils/aggregate'
+import { useFlowSummary } from '~/composables/useFlowSummary'
 import { formatKRW, formatNumber, formatDate, formatPercent } from '~/utils/format'
 
 const {
@@ -11,6 +12,8 @@ const {
 } = useExpenses()
 const { savingsPaymentNames } = useTaxonomies()
 const kpi = computed(() => computeKPIs(filtered.value))
+// 순수지 Hero·수입은 어디로 갔나·흐름은 저축을 지출에서 분리해 집계한다. KPI 총지출과의 차이(저축 태그 결제분)를 밝혀 둔다.
+const { expense: flowExpense, kpiExpenseGap } = useFlowSummary()
 
 const dateRangeLabel = computed(() => {
   const { start, end } = kpi.value.dateRange
@@ -107,7 +110,7 @@ const incomeCount = computed(() => incomeFiltered.value.length)
     </div>
     <div class="card">
       <div class="kpi-label">총 지출</div>
-      <div class="kpi-value mt-1">{{ formatKRW(kpi.total) }}</div>
+      <div class="kpi-value mt-1 text-orange-700">{{ formatKRW(kpi.total) }}</div>
 
       <!-- 직전 기간 대비 — 지출은 줄어드는 쪽이 좋다 -->
       <div v-if="showPrev && prev" class="mt-1.5 flex items-center gap-1.5 flex-wrap">
@@ -133,6 +136,9 @@ const incomeCount = computed(() => incomeFiltered.value.length)
       </div>
 
       <div class="mt-2 text-xs text-slate-500">{{ dateRangeLabel }}</div>
+      <div v-if="kpiExpenseGap > 0" class="mt-0.5 text-[11px] text-slate-400">
+        저축 태그 결제 {{ formatKRW(kpiExpenseGap) }} 포함 · 저축 분리 시 {{ formatKRW(flowExpense) }}
+      </div>
     </div>
     <!--
       월 저축 금액 — 결제수단에 '저축' 태그가 붙은 거래의 합계.

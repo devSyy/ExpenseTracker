@@ -1,11 +1,15 @@
 // 카드 관리 컴포저블 — cardsRepo 위에 계산·액션을 얹은 레이어.
 // 사용금액은 대시보드 거래(useExpenses)에 연결된 paymentMethod 합계로 자동 계산되며,
 // 연결되지 않은 카드는 card.monthlySpending(수기 입력)을 fallback으로 사용한다.
+import { createId } from '~/utils/id'
 import { computed, ref } from 'vue'
 import { cardsRepo, defaultCardState } from '~/repositories/cardsRepository'
 import type { CardBenefitTier, CardItem, CardState } from '~/repositories/cardsRepository'
-import { useExpenses } from '~/composables/useExpenses'
+import { useExpenses, isExcluded, flowKind } from '~/composables/useExpenses'
 import { useFamily } from '~/composables/useFamily'
+import { useTaxonomies } from '~/composables/useTaxonomies'
+import type { Transaction } from '~/utils/types'
+import { isLocalCurrencyTx } from '~/utils/localCurrency'
 
 export type { CardBenefitTier, CardItem, CardState }
 
@@ -23,7 +27,11 @@ const visibleCards = computed<CardItem[]>(() => {
 export type Period = 'current' | 'all' | string
 const period = ref<Period>('current')
 
-const currentYm = (): string => new Date().toISOString().slice(0, 7)
+// 로컬(KST) 기준 월 — toISOString()은 UTC라 매월 1일 새벽(00~09시)에 전달로 계산된다
+const currentYm = (): string => {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+}
 
 const periodLabel = computed<string>(() => {
   if (period.value === 'all') return '전체 기간'
@@ -46,21 +54,50 @@ const availablePaymentMethods = computed<string[]>(() => {
   return Array.from(set).sort()
 })
 
-/** 현재 기간(period)에 해당하는 거래 부분집합 */
-const periodTxs = computed(() => {
-  if (period.value === 'all') return dashboardTxs.value
-  const ym = period.value === 'current' ? currentYm() : period.value
-  return dashboardTxs.value.filter((t) => t.monthLabel === ym)
+// ── 사용내역 소스 ──
+// 대시보드의 "현재 화면 필터"(기간·카테고리·결제수단·검색)와는 독립적으로 거래 전체를 본다.
+// 카드 페이지는 자체 기간 선택기를 가지므로 filtered를 쓰면 대시보드 필터에 실적이 끌려다닌다.
+// 대신 filtered와 **같은 판정**(지출 제외 플래그 · 흐름 유형)을 그대로 쓴다.
+
+/** 활성 멤버 + 비활성(숨김) 카테고리가 아닌 거래 — 모든 화면 공통 전제 */
+const baseTxs = computed<Transaction[]>(() => {
+  const fam = useFamily()
+  const hidden = new Set(useTaxonomies().categories.value.filter((c) => c.hidden).map((c) => c.name))
+  return dashboardTxs.value.filter((t) => fam.isMemberActive(t.memberId) && !hidden.has(t.category))
 })
 
-/** 카드 한 장의 효과적 사용금액 = 연결된 paymentMethod 합계 (없으면 수동값) */
+export type UsageStatus = { counted: true } | { counted: false; reason: string }
+
+/** 실적(사용금액)에 잡히는 거래인지. 안 잡히면 사유를 함께 돌려준다. */
+function usageStatus(t: Transaction): UsageStatus {
+  // 지역화폐로 결제한 건은 카드 실적이 아니다 — 카드 거래 원본은 남기되 카드 사용금액에서는 뺀다
+  if (isLocalCurrencyTx(t)) return { counted: false, reason: '지역화폐' }
+  if (isExcluded(t)) return { counted: false, reason: t.refund || t.refundPair ? '환불' : '지출 제외' }
+  const kind = flowKind(t)
+  if (kind === null) return { counted: false, reason: '이체/중복' }
+  if (kind !== '지출') return { counted: false, reason: kind }
+  return { counted: true }
+}
+
+const ymOf = (t: Transaction): string => t.monthLabel
+
+/** 현재 기간(period)에 해당하는 거래 부분집합 */
+const periodTxs = computed<Transaction[]>(() => {
+  if (period.value === 'all') return baseTxs.value
+  const ym = period.value === 'current' ? currentYm() : period.value
+  return baseTxs.value.filter((t) => ymOf(t) === ym)
+})
+
+/** 카드 한 장의 효과적 사용금액 = 연결된 paymentMethod의 **실적 인정** 거래 합계 (없으면 수동값) */
 function effectiveSpendingFor(card: CardItem): number {
   const linked = card.linkedPaymentMethods ?? []
   if (linked.length === 0) return card.monthlySpending || 0
   const set = new Set(linked)
-  return periodTxs.value
-    .filter((t) => set.has(t.paymentMethod))
-    .reduce((s, t) => s + t.amount, 0)
+  let sum = 0
+  for (const t of periodTxs.value) {
+    if (set.has(t.paymentMethod) && usageStatus(t).counted) sum += Number(t.amount) || 0
+  }
+  return sum
 }
 
 /** 대시보드 연결 여부 */
@@ -151,17 +188,109 @@ const cardDetails = computed<CardDetail[]>(() =>
   })
 )
 
-// ── 액션 ──
+// ── 사용내역 (대시보드 거래 동기화) ──
 
-function uid() {
-  return 'cd_' + Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4)
+export interface UsageRow {
+  tx: Transaction
+  counted: boolean
+  reason: string
 }
+export interface UsageSummary {
+  rows: UsageRow[]                 // 기간 내 전체 거래 (최신순, 제외 항목 포함)
+  countedTotal: number
+  countedCount: number
+  excludedTotal: number
+  excludedCount: number
+  lastUsedAt: Date | null
+  byCategory: { name: string; amount: number; ratio: number }[]
+  byMonth: { ym: string; amount: number }[]   // 최근 6개월 (기간 선택과 무관)
+}
+
+const toDate = (v: unknown): Date => (v instanceof Date ? v : new Date(v as string))
+
+function usageOf(card: CardItem): UsageSummary {
+  const linked = new Set(card.linkedPaymentMethods ?? [])
+  const mine = (t: Transaction) => linked.has(t.paymentMethod)
+
+  const rows: UsageRow[] = periodTxs.value
+    .filter(mine)
+    .map((tx) => {
+      const st = usageStatus(tx)
+      return { tx, counted: st.counted, reason: st.counted ? '' : st.reason }
+    })
+    .sort((a, b) => toDate(b.tx.date).getTime() - toDate(a.tx.date).getTime())
+
+  let countedTotal = 0, countedCount = 0, excludedTotal = 0, excludedCount = 0
+  const cat = new Map<string, number>()
+  for (const r of rows) {
+    const amt = Number(r.tx.amount) || 0
+    if (r.counted) {
+      countedTotal += amt; countedCount++
+      cat.set(r.tx.category, (cat.get(r.tx.category) ?? 0) + amt)
+    } else { excludedTotal += amt; excludedCount++ }
+  }
+  const byCategory = Array.from(cat, ([name, amount]) => ({ name, amount, ratio: countedTotal > 0 ? amount / countedTotal : 0 }))
+    .sort((a, b) => b.amount - a.amount)
+
+  // 최근 6개월 추이 — 전체 거래 기준(기간 선택과 무관), 실적 인정분만
+  const mo = new Map<string, number>()
+  for (const t of baseTxs.value) {
+    if (!mine(t) || !usageStatus(t).counted) continue
+    mo.set(ymOf(t), (mo.get(ymOf(t)) ?? 0) + (Number(t.amount) || 0))
+  }
+  const byMonth: { ym: string; amount: number }[] = []
+  const now = new Date()
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
+    const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+    byMonth.push({ ym, amount: mo.get(ym) ?? 0 })
+  }
+
+  return {
+    rows, countedTotal, countedCount, excludedTotal, excludedCount,
+    lastUsedAt: rows.length ? toDate(rows[0].tx.date) : null,
+    byCategory, byMonth
+  }
+}
+
+/** 이 결제수단을 이미 쓰고 있는 카드 (한 결제수단이 두 카드에 연결되면 실적이 이중 집계된다) */
+function ownerOf(pm: string): CardItem | undefined {
+  return state.value.cards.find((c) => (c.linkedPaymentMethods ?? []).includes(pm))
+}
+
+/** 어떤 카드에도 연결되지 않은 대시보드 결제수단 */
+const unlinkedPaymentMethods = computed<string[]>(() =>
+  availablePaymentMethods.value.filter((pm) => !ownerOf(pm))
+)
+
+/** 연결해 둔 결제수단이 대시보드에서 사라진 경우 (이름 변경·삭제) — 실적이 조용히 0이 되는 걸 막는다 */
+function brokenLinksOf(card: CardItem): string[] {
+  const live = new Set(availablePaymentMethods.value)
+  return (card.linkedPaymentMethods ?? []).filter((pm) => !live.has(pm))
+}
+
+/** 카드사/카드명과 이름이 겹치는, 아직 주인 없는 결제수단 추천 */
+function suggestLinksFor(card: CardItem): string[] {
+  const keys = [card.issuer, card.name]
+    .map((x) => (x || '').replace(/카드|체크|뱅크/g, '').trim())
+    .filter((x) => x.length >= 2)
+  if (keys.length === 0) return []
+  return unlinkedPaymentMethods.value.filter((pm) => keys.some((k) => pm.includes(k) || k.includes(pm.replace(/카드|체크/g, ''))))
+}
+
+function linkPayment(cardId: string, pm: string): boolean {
+  const card = state.value.cards.find((c) => c.id === cardId)
+  if (!card || ownerOf(pm)) return false
+  return updateCard(cardId, { linkedPaymentMethods: [...(card.linkedPaymentMethods ?? []), pm] })
+}
+
+// ── 액션 ──
 
 function addCard(input: Omit<CardItem, 'id'>): CardItem {
   const fam = useFamily()
   const card: CardItem = {
     ...input,
-    id: uid(),
+    id: createId('cd_'),
     benefits: input.benefits ?? [],
     linkedPaymentMethods: input.linkedPaymentMethods ?? [],
     memberId: input.memberId ?? fam.primaryMemberId.value ?? undefined
@@ -203,7 +332,7 @@ function autoGenerateFromDashboard(): { added: number; skipped: number } {
     if (existingLinks.has(pm)) { skipped++; continue }
     const colorIdx = simpleHash(pm) % palette.length
     newCards.push({
-      id: uid(),
+      id: createId('cd_'),
       name: pm,
       issuer: inferIssuer(pm),
       type: pm.includes('체크') ? '체크카드' : pm.includes('카드') ? '신용카드' : '하이브리드',
@@ -276,6 +405,12 @@ export function useCards() {
     achievedTiers,
     achievedValue,
     cardDetails,
+    usageOf,
+    ownerOf,
+    unlinkedPaymentMethods,
+    brokenLinksOf,
+    suggestLinksFor,
+    linkPayment,
     addCard,
     updateCard,
     removeCard,

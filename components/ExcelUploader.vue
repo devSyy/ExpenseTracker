@@ -2,6 +2,7 @@
 // 파일 선택 / 드래그 앤 드롭 영역만 담당하는 프레젠테이션 컴포넌트.
 // 파싱·검증·저장은 상위(MemberUploadPanel)에서 처리한다.
 import { ref } from 'vue'
+import { ACCEPT_ATTR } from '~/utils/parseExcel'
 
 const props = withDefaults(
   defineProps<{
@@ -16,7 +17,7 @@ const props = withDefaults(
   {
     disabled: false,
     busy: false,
-    accept: '.xlsx,.xlsm,.xlsb,.xls,.csv,.tsv,.txt',
+    accept: ACCEPT_ATTR,
     disabledHint: '가족 구성원을 먼저 선택해 주세요.'
   }
 )
@@ -87,5 +88,23 @@ function onDragOver(e: DragEvent) {
         </p>
       </template>
     </div>
+  </label>
+
+  <!--
+    모바일 파일 선택기 탈출구.
+
+    accept 에 MIME 타입까지 넣어도, 파일 제공자가 xlsx 를 application/octet-stream 으로
+    보고하는 경우(일부 안드로이드 파일 앱·클라우드 드라이브)에는 여전히 회색으로 비활성화된다.
+    그럴 때 쓰라고 accept 없는 입력을 하나 더 둔다. label 중첩은 불가능하므로
+    위 드롭존 <label> 바깥에 별도 label 로 놓는다.
+
+    필터가 없을 뿐 검증은 동일하다 — 고른 파일이 지원 형식이 아니면 상위에서 오류로 막는다.
+   -->
+  <label
+    v-if="!disabled && !busy"
+    class="mt-2 block text-center text-[11px] text-slate-400 hover:text-slate-600 underline cursor-pointer"
+  >
+    <input type="file" class="hidden" @change="onSelect" />
+    파일이 회색으로 표시돼 선택되지 않나요? 모든 파일에서 고르기
   </label>
 </template>

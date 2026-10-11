@@ -133,11 +133,11 @@ const COLOR_PRESETS = ['#3b82f6', '#ec4899', '#10b981', '#f59e0b', '#8b5cf6', '#
     </div>
 
     <!-- 토스트 -->
-    <transition name="fade">
+    <transition name="toast-drop">
       <div
         v-if="toast"
         :class="[
-          'fixed top-6 right-6 z-50 px-4 py-2 rounded-lg shadow text-sm whitespace-pre-line max-w-sm leading-relaxed',
+          'fixed top-6 inset-x-0 mx-auto w-fit text-center z-50 px-4 py-2 rounded-lg shadow text-sm whitespace-pre-line max-w-sm leading-relaxed',
           toast.kind === 'ok' ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white'
         ]"
       >{{ toast.text }}</div>

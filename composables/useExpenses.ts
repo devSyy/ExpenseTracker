@@ -16,7 +16,8 @@ import {
 } from '~/repositories/transactionsRepository'
 import { useTaxonomies } from '~/composables/useTaxonomies'
 import { useFamily } from '~/composables/useFamily'
-import { REFUND_CATEGORY } from '~/utils/types'
+import { autoExcludeTargets } from '~/utils/txTable'
+import { REFUND_CATEGORY, DEFAULT_INCOME_CATEGORIES, type TxType } from '~/utils/types'
 import type {
   Category,
   CostType,
@@ -93,7 +94,16 @@ const filters = reactive<Filters>({
 
 /** 거래가 "지출 계산 제외" 상태인지 — 값이 없으면(구버전 포함) 포함(false)이 기본 */
 export function isExcluded(t: Transaction): boolean {
-  return t.excluded === true
+  return t.excluded === true || isCategoryExcluded(t)
+}
+
+/**
+ * 카테고리 설정(지출 계산 제외)으로 제외되는 거래인지.
+ * 거래의 excluded 플래그와 무관하게 카테고리 설정을 그대로 따르므로 설정을 끄면 즉시 복귀한다.
+ * (거래 플래그를 건드리지 않으므로 사용자가 개별로 켠 제외는 그대로 보존된다)
+ */
+export function isCategoryExcluded(t: Transaction): boolean {
+  return useTaxonomies().isExcludedCategory(t.category)
 }
 
 /**
@@ -139,12 +149,60 @@ watch(
   { flush: 'sync', immediate: true }
 )
 
+/** 저축 유형 카테고리의 거래인지 — 환불 태그·환불 상계 대상이 아니다 */
+export function isSavingsCategoryTx(t: Transaction): boolean {
+  return useTaxonomies().categoryType(t.category) === '저축'
+}
+
+/**
+ * '환불' 태그가 붙고 내용이 같은 거래를 "지출 계산 제외"로 **자동 체크**한다.
+ * 대상 판정은 autoExcludeTargets(순수 함수). 거래당 한 번만 적용하고 autoExcludeApplied 마커를 남기므로
+ * 사용자가 나중에 체크를 해제하면 다시 켜지지 않는다. (업로드·수기 추가·기존 데이터 로드 모두 이 감시자를 지난다)
+ */
+let autoExcluding = false
+function applyAutoExclusion(): void {
+  if (autoExcluding) return
+  autoExcluding = true
+  try {
+    const targets = autoExcludeTargets(transactions.value, isSavingsCategoryTx)
+    let changed = 0
+    const next = transactions.value.map((t) => {
+      // 판정 규칙이 바뀌어 더 이상 대상이 아닌데 예전에 자동 제외된 거래는 원복한다
+      // (예: 예전 '중복' 규칙으로 자동 제외됐던 거래 — 중복 판정은 제거되어 이 경로로 원복된다). 사용자가 해제한 거래(excluded=false)는 마커만 정리된다.
+      if (t.autoExcludeApplied && !targets.has(t.id)) {
+        changed++
+        const { autoExcludeApplied: _a, autoExcludedIncome: _b, ...rest } = t
+        return { ...rest, excluded: isIncomeTransaction(t) ? true : false }
+      }
+      if (!targets.has(t.id) || t.autoExcludeApplied) return t
+      changed++
+      // 수입 거래는 excluded가 원래 항상 true라 지출 쪽 플래그로는 수입 합계에서 못 뺀다 → 수입용 플래그를 따로 켠다
+      return isIncomeTransaction(t)
+        ? { ...t, excluded: true, autoExcludeApplied: true, autoExcludedIncome: true }
+        : { ...t, excluded: true, autoExcludeApplied: true }
+    })
+    if (changed > 0) transactions.value = next
+  } finally {
+    autoExcluding = false
+  }
+}
+watch(transactions, () => applyAutoExclusion(), { flush: 'sync', immediate: true })
+
 /**
  * 환불로 분류된 거래인지.
  * 음수라고 무조건 true가 아니다 — 지출 유형이면서 같은 금액의 양수 지출과 짝이 맞은 것만 해당.
  */
 export function isRefund(t: Transaction): boolean {
-  return t.refund === true
+  return t.refund === true && !isSavingsCategoryTx(t)
+}
+
+/**
+ * 환불 짝의 상대편 행(원래 결제 / 환불 입금)인지 — '환불' 배지 표시용.
+ * 카테고리·집계에는 영향이 없다. 반환값은 배지 툴팁 구분에 쓴다.
+ */
+export function refundLinkOf(t: Transaction): 'origin' | 'deposit' | null {
+  if (isSavingsCategoryTx(t)) return null // 저축 카테고리 거래에는 환불 태그가 없다
+  return t.refundPair === 'origin' || t.refundPair === 'deposit' ? t.refundPair : null
 }
 
 /**
@@ -166,12 +224,73 @@ export function isNegativeAmount(t: Transaction): boolean {
 }
 
 /**
- * 금액 계산에 반영되는 거래인지.
- * - 지출 계산 제외 플래그가 켜진 거래: 제외
- * - 음수 금액 거래: 제외 (환불로 분류됐든 아니든 "쓴 돈"이 아니다)
+ * 환불로 **상계된** 행인지 — 환불 짝의 상대편(취소된 원래 결제 / 환불 입금).
+ * 취소된 결제와 환불은 서로 지워지므로 두 행 모두 합계에서 빼야 한다.
+ * (음수 환불 행은 negativeAmount로 이미 빠지고, 이 행들이 짝을 맞춰 준다)
  */
-function countsTowardTotals(t: Transaction): boolean {
-  return !isExcluded(t) && !isNegativeAmount(t)
+export function isRefundOffset(t: Transaction): boolean {
+  return refundLinkOf(t) !== null
+}
+
+/**
+ * 거래가 수입/지출 흐름에서 어느 쪽으로 집계되는지 — **KPI와 수입지출 흐름(Sankey)이 공유하는 단일 규칙.**
+ *  - 이체 카테고리, 환불로 상계된 행(취소된 원래 결제·환불 입금): 어느 쪽에도 넣지 않는다 (null)
+ *  - 음수 금액 거래: 저축 유형 카테고리가 아니면 '지출' (사용자 규칙: 음수 = 지출, 차감 아님)
+ *  - 그 외: 카테고리 유형 그대로 (수입/지출/저축)
+ * 지출의 "지출 계산 제외" 플래그는 여기서 보지 않는다 — 지출 합계를 내는 쪽에서 isExcluded()로 거른다
+ * (수입은 excluded가 항상 켜져 있어 플래그를 볼 수 없다).
+ */
+export type FlowKind = '수입' | '지출' | '저축'
+
+/**
+ * 저축 이중 집계 방지 — A통장에서 음수로 빠진 저축 행과 적금통장에 양수로 들어온 행은 **같은 돈**이다.
+ * 둘 다 저축 유형 카테고리면 합치면 2배가 되므로, 같은 날짜·같은 금액으로 1:1 짝이 맞는
+ * (음수 행, 양수 행) 쌍에서는 **양수(입금) 행을 집계에서 뺀다** (음수 행 쪽을 저축으로 센다).
+ * 짝이 없는 양수 저축 행(상대편이 다른 카테고리·다른 날짜)은 그대로 저축으로 센다.
+ * 필터와 무관하게 전체 거래로 짝을 맞추므로 짝이 필터 밖에 있어도 결과가 같다.
+ */
+const savingsMirrorIds = computed<Set<string>>(() => {
+  const tax = useTaxonomies()
+  const negatives = new Map<string, number>() // 날짜|금액 → 아직 짝이 안 맞은 음수 저축 행 수
+  const key = (t: Transaction) => {
+    const d = t.date
+    return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}|${Math.round(Number(t.amount) || 0)}`
+  }
+  const savings = transactions.value.filter((t) => tax.categoryType(t.category) === '저축' && t.excluded !== true)
+  for (const t of savings) if (isNegativeAmount(t)) negatives.set(key(t), (negatives.get(key(t)) ?? 0) + 1)
+  const out = new Set<string>()
+  for (const t of savings) {
+    if (isNegativeAmount(t)) continue
+    const k = key(t)
+    const left = negatives.get(k) ?? 0
+    if (left > 0) { negatives.set(k, left - 1); out.add(t.id) }
+  }
+  return out
+})
+
+export function flowKind(t: Transaction): FlowKind | null {
+  const type = useTaxonomies().categoryType(t.category)
+  if (type === '이체' || type === '충전' || isRefundOffset(t)) return null
+  // 설정에서 '지출제외'를 켠 수입 카테고리는 수입 합계에서 뺀다 (지출은 filtered 쪽에서 isExcluded로 거른다).
+  // 저축은 지출제외를 켜도 저축 집계(저축 구성)에 그대로 들어간다 — 지출제외는 '지출 계산'에서만 뺀다는 뜻이다.
+  if (type === '수입' && isCategoryExcluded(t)) return null
+  // 음수 = 지출. 단 저축 유형 카테고리는 음수여도 저축이다 (통장에서 저축으로 빠져나간 돈이 음수로 기록되므로)
+  if (isNegativeAmount(t) && type !== '저축') return '지출'
+  if (type === '수입' && t.autoExcludedIncome) return null // 중복/환불 자동 제외된 수입
+  if (type === '저축' && t.excluded === true) return null // 중복/환불 자동 제외된 저축 거래 (카테고리 설정이 아니라 거래 플래그)
+  if (type === '저축' && !isNegativeAmount(t) && savingsMirrorIds.value.has(t.id)) return null // 음수 출금 행과 짝이 맞는 입금 행 — 같은 돈이라 한 번만 센다
+  return type === '수입' || type === '저축' ? type : '지출'
+}
+
+/**
+ * 저축으로 집계되는 거래인지 (지출과 별개의 흐름).
+ *  - 저축 유형 카테고리의 거래, 또는
+ *  - 저축 태그 결제수단으로 나간 (제외되지 않은) 지출 거래
+ */
+export function isSavingsFlow(t: Transaction): boolean {
+  const kind = flowKind(t)
+  if (kind === '저축') return true
+  return kind === '지출' && !isExcluded(t) && useTaxonomies().isSavingsPayment(t.paymentMethod)
 }
 
 /**
@@ -226,10 +345,9 @@ const filteredAll = computed<Transaction[]>(() => {
  *  3) **수입 카테고리**로 분류된 거래 (카테고리 관리에서 유형을 '수입'으로 설정한 것)
  * 덕분에 집계 컴포넌트를 따로 수정하지 않아도 모든 계산이 자동으로 세 규칙을 존중한다.
  */
-const filtered = computed<Transaction[]>(() => {
-  const tax = useTaxonomies()
-  return filteredAll.value.filter((t) => countsTowardTotals(t) && tax.categoryType(t.category) === '지출')
-})
+const filtered = computed<Transaction[]>(() =>
+  filteredAll.value.filter((t) => !isExcluded(t) && flowKind(t) === '지출')
+)
 
 /**
  * 수입 카테고리로 분류된 거래.
@@ -238,10 +356,9 @@ const filtered = computed<Transaction[]>(() => {
  * 뜻일 뿐 수입 집계와는 무관하므로, 여기서는 excluded를 보지 않는다.
  * (음수 금액 거래는 지출 쪽과 동일하게 뺀다 — 실제로 들어온 돈이 아니다)
  */
-const incomeFiltered = computed<Transaction[]>(() => {
-  const tax = useTaxonomies()
-  return filteredAll.value.filter((t) => !isNegativeAmount(t) && tax.categoryType(t.category) === '수입')
-})
+const incomeFiltered = computed<Transaction[]>(() =>
+  filteredAll.value.filter((t) => flowKind(t) === '수입')
+)
 
 /** 수입 합계 — 수입 카테고리 거래의 금액 합 */
 const incomeTotal = computed<number>(() =>
@@ -263,10 +380,7 @@ const netTotal = computed<number>(() => incomeTotal.value - expenseTotal.value)
 // 주의: 저축 태그 거래도 지출 유형이므로 `filtered`에 그대로 남아 **총 지출에 포함된다.**
 // 총 지출의 정의를 바꾸면 기존 집계·차트가 전부 따라 움직이므로 여기서는 건드리지 않고,
 // 저축 금액을 별도 지표로만 더한다.
-const savingsFiltered = computed<Transaction[]>(() => {
-  const tax = useTaxonomies()
-  return filtered.value.filter((t) => tax.isSavingsPayment(t.paymentMethod))
-})
+const savingsFiltered = computed<Transaction[]>(() => filteredAll.value.filter(isSavingsFlow))
 
 /** 필터 범위의 저축 합계 */
 const savingsTotal = computed<number>(() =>
@@ -274,7 +388,9 @@ const savingsTotal = computed<number>(() =>
 )
 
 /** 저축 집계 (합계 · 월 환산 · 건수) — computeSavings와 같은 규칙 */
-const savingsSummary = computed(() => computeSavings(filtered.value, useTaxonomies().isSavingsPayment))
+const savingsSummary = computed(() =>
+  computeSavings(savingsFiltered.value, [...filtered.value, ...savingsFiltered.value].map((t) => t.monthLabel))
+)
 
 /** 저축률 = 저축 ÷ 수입. 수입이 없으면 비율을 낼 수 없으므로 null */
 const savingsRate = computed<number | null>(() => {
@@ -282,17 +398,15 @@ const savingsRate = computed<number | null>(() => {
   return savingsTotal.value / incomeTotal.value
 })
 
-/** 현재 필터 범위의 환불 거래 수 */
-const refundCount = computed<number>(() => filteredAll.value.reduce((n, t) => n + (isRefund(t) ? 1 : 0), 0))
+/**
+ * 현재 필터 범위의 환불 거래 수 — 거래의 **현재 카테고리가 '환불'** 인 것만 센다.
+ * (배지·취소선과 같은 기준. 업로드 시점의 refund 플래그로 세면 사용자가 카테고리를 바꾼 뒤 숫자가 어긋난다)
+ */
+const refundCount = computed<number>(() => filteredAll.value.reduce((n, t) => n + (isRefundCategory(t) ? 1 : 0), 0))
 
-/** 환불로 합계에 반영되지 않은 금액 */
+/** 환불 카테고리 거래의 금액 합계 (환불 입금액) */
 const refundAmount = computed<number>(() =>
-  filteredAll.value.reduce((s, t) => s + (isRefund(t) ? (Number(t.amount) || 0) : 0), 0)
-)
-
-/** 음수지만 환불로 분류되지 않은 (짝이 없는) 거래 수 */
-const unmatchedNegativeCount = computed<number>(() =>
-  filteredAll.value.reduce((n, t) => n + (isNegativeAmount(t) && !isRefund(t) ? 1 : 0), 0)
+  filteredAll.value.reduce((s, t) => s + (isRefundCategory(t) ? (Number(t.amount) || 0) : 0), 0)
 )
 
 /**
@@ -300,7 +414,11 @@ const unmatchedNegativeCount = computed<number>(() =>
  * 수입 거래는 자동으로 항상 제외 상태이므로 여기 포함하면 요약이 늘 부풀어 의미를 잃는다.
  */
 function isUserExcludedExpense(t: Transaction): boolean {
-  return isExcluded(t) && !useTaxonomies().isIncomeCategory(t.category)
+  const type = useTaxonomies().categoryType(t.category)
+  if (type === '수입') return false
+  // 카테고리 설정으로만 제외된 이체·저축은 '지출 제외 N건'에 넣지 않는다 (지출이 아니므로)
+  if (type !== '지출' && t.excluded !== true) return false
+  return isExcluded(t)
 }
 
 /** 현재 필터 범위에서 "지출 계산 제외"로 표시된 거래 수 */
@@ -361,13 +479,11 @@ function totalsFor(year: number, month: number | null, label: string): PeriodTot
     if (!matchesNonPeriodFilters(t, hiddenCats, q)) continue
 
     const amount = Number(t.amount) || 0
-    const type = tax.categoryType(t.category)
-    if (type === '수입') {
-      // 수입은 excluded가 항상 켜져 있으므로 그 플래그를 보지 않는다 (incomeFiltered와 동일 규칙)
-      if (!isNegativeAmount(t)) out.income += amount
-      continue
-    }
-    if (!countsTowardTotals(t)) continue
+    const kind = flowKind(t)
+    if (kind === null) continue // 이체·환불 상계 행은 어느 쪽 합계에도 넣지 않는다
+    if (kind === '수입') { out.income += amount; continue } // 수입은 excluded 플래그를 보지 않는다 (incomeFiltered와 동일)
+    if (kind === '저축') { out.savings += amount; continue } // 저축 유형 카테고리 — 지출과 별개
+    if (isExcluded(t)) continue
     out.expense += amount
     out.count += 1
     if (t.costType === '고정비') out.fixed += amount
@@ -415,11 +531,10 @@ function monthSummary(year: number, month: number): MonthSummary {
     if (hiddenCats.has(t.category)) continue
 
     const amount = Number(t.amount) || 0
-    if (tax.categoryType(t.category) === '수입') {
-      if (!isNegativeAmount(t)) income += amount
-      continue
-    }
-    if (!countsTowardTotals(t)) continue
+    const kind = flowKind(t)
+    if (kind === null || kind === '저축') continue // 이체·저축·환불 상계는 수입·지출 어디에도 넣지 않는다
+    if (kind === '수입') { income += amount; continue }
+    if (isExcluded(t)) continue
     expense += amount
     count += 1
   }
@@ -549,15 +664,37 @@ function setParseResult(r: ParseResult, name: string) {
   registerDiscoveredTaxonomies(r.transactions)
 }
 
+/**
+ * 새로 발견된 카테고리의 유형 추정 — 파일의 '타입' 열(가장 많은 값)과 이름으로 판단한다.
+ *  수입 → 수입 / 이체 → (저축·적금·투자 등 이름이면 저축, 아니면 이체) / 그 외 → 지출
+ * 타입 열이 없는 파일은 예전처럼 지출이다. 이름이 기본 수입 카테고리면 수입으로 둔다.
+ * 추정이 틀렸다면 설정 > 카테고리에서 유형을 바꾸면 모든 거래가 바로 따라간다.
+ */
+const SAVINGS_NAME_RE = /저축|적금|예금|투자|펀드|연금|청약|ISA|비상금/i
+function inferCategoryType(name: string, byType: Map<string, number>): TxType {
+  let top: string | null = null
+  let n = 0
+  for (const [k, v] of byType) if (v > n) { top = k; n = v }
+  if (top === '수입') return '수입'
+  if (top === '이체') return SAVINGS_NAME_RE.test(name) ? '저축' : '이체'
+  if (top === '지출') return '지출'
+  return (DEFAULT_INCOME_CATEGORIES as readonly string[]).includes(name) ? '수입' : '지출'
+}
+
 function registerDiscoveredTaxonomies(txs: Transaction[]) {
   const tax = useTaxonomies()
-  const cats = new Set<string>()
+  const cats = new Map<string, Map<string, number>>()   // 카테고리 → (파일 타입 → 건수)
   const pays = new Set<string>()
   for (const t of txs) {
-    if (t.category) cats.add(t.category)
+    if (t.category) {
+      const m = cats.get(t.category) ?? new Map<string, number>()
+      if (t.fileType) m.set(t.fileType, (m.get(t.fileType) ?? 0) + 1)
+      cats.set(t.category, m)
+    }
     if (t.paymentMethod) pays.add(t.paymentMethod)
   }
-  for (const c of cats) tax.addCategory(c)
+  // 새 카테고리만 등록된다(이미 있으면 addCategory가 거절) — 사용자가 정한 유형은 절대 덮어쓰지 않는다
+  for (const [c, byType] of cats) tax.addCategory(c, false, inferCategoryType(c, byType))
   for (const p of pays) tax.addPayment(p)
 }
 
@@ -571,6 +708,39 @@ function reset() {
 }
 
 // ── 거래 단위 편집 ──
+
+/**
+ * 카테고리가 바뀌면 그 카테고리의 설정(고정비 여부)으로 구분(고정비/변동비)도 다시 맞춘다.
+ * 구분은 거래마다 저장되는 값이라 카테고리만 바꾸면 고정비/변동비 집계가 예전 값으로 남기 때문이다.
+ * (수입/지출은 카테고리 유형, 카테고리·결제수단 집계는 카테고리/결제수단 값에서 바로 계산되므로 따로 맞출 것이 없다)
+ */
+function costTypeForCategory(category: Category): CostType {
+  return useTaxonomies().isFixedCategory(category) ? '고정비' : '변동비'
+}
+
+/**
+ * 설정에서 카테고리의 '고정비' 체크가 바뀌면 그 카테고리 거래의 구분도 즉시 따라간다.
+ * 이름이 바뀌거나 새로 생긴 카테고리는 비교 대상이 아니므로(체크 변화가 아님) 거래의 구분을 건드리지 않는다.
+ */
+const fixedSnapshot = () => new Map(useTaxonomies().categories.value.map((c) => [c.name, c.isFixed === true]))
+let prevFixed = fixedSnapshot()
+watch(
+  () => useTaxonomies().categories.value,
+  () => {
+    const cur = fixedSnapshot()
+    const flipped = new Map<string, CostType>()
+    for (const [name, fixed] of cur) {
+      if (prevFixed.has(name) && prevFixed.get(name) !== fixed) flipped.set(name, fixed ? '고정비' : '변동비')
+    }
+    prevFixed = cur
+    if (flipped.size === 0) return
+    transactions.value = transactions.value.map((t) => {
+      const ct = flipped.get(t.category)
+      return ct && t.costType !== ct ? { ...t, costType: ct } : t
+    })
+  },
+  { flush: 'sync' }
+)
 type EditablePatch = Partial<Pick<Transaction, 'category' | 'paymentMethod' | 'costType'>>
 
 function updateTransaction(id: string, patch: EditablePatch): boolean {
@@ -623,7 +793,7 @@ function withMappedCategory<T extends Transaction>(t: T): T {
   if (!mappingAppliesTo(t)) return t
   const mapped = mappedCategoryOf(t.paymentMethod)
   if (!mapped || mapped === t.category) return t
-  return { ...t, category: mapped }
+  return { ...t, category: mapped, costType: costTypeForCategory(mapped) }
 }
 
 /**
@@ -676,7 +846,7 @@ function updatePaymentMethod(id: string, paymentMethod: PaymentMethod): PaymentU
     arr[idx] = {
       ...current,
       paymentMethod: name,
-      ...(nextCategory ? { category: nextCategory } : {})
+      ...(nextCategory ? { category: nextCategory, costType: costTypeForCategory(nextCategory) } : {})
     }
     transactions.value = arr
     return { ok: true, paymentMethod: name, category: nextCategory }
@@ -711,6 +881,8 @@ function setExcluded(id: string, excluded: boolean): ExcludeUpdateResult {
   const current = transactions.value[idx]!
   // 수입 거래는 항상 제외 상태다 — 해제 요청은 무시한다(UI에서도 체크박스가 비활성).
   if (isIncomeTransaction(current)) return { ok: true, excluded: true, changed: false }
+  // 카테고리 설정으로 제외된 거래는 개별로 바꿀 수 없다 — 설정에서 카테고리 플래그를 해제해야 한다.
+  if (isCategoryExcluded(current)) return { ok: true, excluded: true, changed: false }
 
   const next = excluded === true
   if (isExcluded(current) === next) return { ok: true, excluded: next, changed: false }
@@ -751,6 +923,7 @@ function setExcludedMany(ids: string[], excluded: boolean): BulkExcludeResult {
     const arr = snapshot.map((t) => {
       if (!targets.has(t.id)) return t          // 대상 외 — 원본 그대로
       if (isIncomeTransaction(t)) return t      // 수입 거래 — 항상 제외 상태 유지
+      if (isCategoryExcluded(t)) return t       // 카테고리 설정으로 제외 — 개별 변경 불가
       if (isExcluded(t) === next) return t      // 이미 같은 값 — 그대로
       changed++
       return { ...t, excluded: next }           // excluded만 변경, 나머지 필드 보존
@@ -760,6 +933,60 @@ function setExcludedMany(ids: string[], excluded: boolean): BulkExcludeResult {
   } catch (e) {
     transactions.value = snapshot // 롤백
     return { ok: false, changed: 0, reason: (e as Error).message }
+  }
+}
+
+// ── 선불 자산(지역화폐) 사용 표시 ──
+//
+// 원본 카드 거래는 **삭제·수정하지 않고** localCurrencyUsed/localCurrencyId 두 필드만 덧붙이거나 뗀다.
+// 카테고리·금액·결제수단은 그대로. 사용 체크 시 excluded=true(지출 제외)도 함께 켜고, 해제 시 localCurrencyExcluded 마커가 있을 때만 원복한다.
+// 어느 자산을 고를 수 있는지(활성·연결 여부)는 판정이 반응형 설정을 필요로 하므로
+// useLocalCurrency().applyToTransaction()이 맡고, 여기서는 단건 쓰기만 한다.
+// 항상 **단건 전용**이다 — 해당 인덱스 1개만 교체한다.
+
+export interface LocalCurrencyUpdateResult {
+  ok: boolean
+  changed?: boolean
+  reason?: string
+}
+
+/** currencyId가 문자열이면 해당 자산 사용으로 표시, null이면 표시를 뗀다. */
+function setLocalCurrency(id: string, currencyId: string | null): LocalCurrencyUpdateResult {
+  const idx = transactions.value.findIndex((t) => t.id === id)
+  if (idx === -1) return { ok: false, reason: '거래를 찾을 수 없습니다. 목록을 새로고침해 주세요.' }
+
+  const current = transactions.value[idx]!
+  const nextId = typeof currencyId === 'string' && currencyId !== '' ? currencyId : null
+  const sameId = (current.localCurrencyId ?? null) === nextId
+  if (sameId && (current.localCurrencyUsed === true) === (nextId !== null)) {
+    return { ok: true, changed: false }
+  }
+
+  const snapshot = transactions.value
+  try {
+    const arr = snapshot.slice()
+    const { localCurrencyUsed: _u, localCurrencyId: _i, localCurrencyExcluded: _x, ...rest } = current
+    if (nextId) {
+      // 사용 체크 → '지출 제외' 자동 ON. 이미 제외 상태였다면(수동·중복/환불 자동·카테고리) 마커를 남기지 않아 해제 시 그대로 둔다.
+      // 자산만 바꾸는 경우(이미 사용 중)에는 기존 마커를 유지한다.
+      const wasLc = current.localCurrencyUsed === true
+      const markerOn = wasLc ? current.localCurrencyExcluded === true : !isExcluded(current)
+      arr[idx] = {
+        ...rest,
+        localCurrencyUsed: true,
+        localCurrencyId: nextId,
+        excluded: true,
+        ...(markerOn ? { localCurrencyExcluded: true } : {})
+      }
+    } else {
+      // 체크 해제 → 우리가 켠 제외만 원복
+      arr[idx] = (current.localCurrencyExcluded === true ? { ...rest, excluded: false } : rest) as Transaction
+    }
+    transactions.value = arr
+    return { ok: true, changed: true }
+  } catch (e) {
+    transactions.value = snapshot // 롤백
+    return { ok: false, reason: (e as Error).message }
   }
 }
 
@@ -883,7 +1110,7 @@ function updateCategoryScoped(id: string, category: Category, scope: UpdateScope
       const inScope = scope === 'single' ? t.id === id : isRelated(t, target)
       if (!inScope || t.category === name) return t
       updated++
-      return { ...t, category: name }
+      return { ...t, category: name, costType: costTypeForCategory(name) }
     })
     if (updated > 0) transactions.value = next
     return { ok: true, scope, updated, category: name, description: target.description }
@@ -897,7 +1124,7 @@ function remapCategory(from: Category, to: Category): number {
   if (from === to) return 0
   let count = 0
   const next = transactions.value.map((t) => {
-    if (t.category === from) { count++; return { ...t, category: to } }
+    if (t.category === from) { count++; return { ...t, category: to, costType: costTypeForCategory(to) } }
     return t
   })
   if (count > 0) transactions.value = next
@@ -918,8 +1145,13 @@ function remapPayment(from: PaymentMethod, to: PaymentMethod): number {
 function reapplyDescriptionRules(): number {
   let changed = 0
   const next = transactions.value.map((t) => {
+    // 내용 기반 룰은 아직 분류되지 않은('기타') 거래에만 적용한다.
+    // 엑셀 업로드 시점에 parseExcel이 이미 룰을 적용했으므로, 여기서 사용자가 직접 고른
+    // 카테고리까지 덮어쓰면 안 된다. (예전에는 대시보드 화면에 들어올 때마다 실행되어
+    // "출금 내역"/"입금 내역" 거래의 카테고리를 바꿔 저장해도 '입출금'으로 되돌아갔다)
+    if (t.category !== '기타') return t
     const newCat = classifyCategory(t.category, t.description)
-    if (newCat !== t.category) { changed++; return { ...t, category: newCat } }
+    if (newCat !== t.category) { changed++; return { ...t, category: newCat, costType: costTypeForCategory(newCat) } }
     return t
   })
   if (changed > 0) transactions.value = next
@@ -1177,15 +1409,20 @@ export function useExpenses() {
     excludedCount,
     excludedAmount,
     isExcluded,
+    isCategoryExcluded,
     isIncomeTransaction,
     isRefund,
     isRefundCategory,
+    refundLinkOf,
+    isRefundOffset,
     isNegativeAmount,
+    flowKind,
+    isSavingsFlow,
     refundCount,
     refundAmount,
-    unmatchedNegativeCount,
     setExcluded,
     setExcludedMany,
+    setLocalCurrency,
     removeTransactions,
     warnings,
     detectedColumns,

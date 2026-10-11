@@ -8,13 +8,7 @@
 //  (2) 8색을 넘어가면 색약 조건에서 서로 구분되지 않는 색이 섞였다.
 // chartTheme.ts의 8슬롯 팔레트는 색약·대비 검증을 통과한 고정 순서이며,
 // 8개를 넘는 항목은 새 색을 만들지 않고 '기타'로 묶어 중립 회색을 쓴다.
-import {
-  CATEGORICAL,
-  FIXED_COLOR,
-  OTHER_COLOR,
-  VARIABLE_COLOR,
-  categoryColors
-} from './chartTheme'
+import { CATEGORICAL, OTHER_COLOR } from './chartTheme'
 
 /** 검증된 카테고리 8슬롯 (고정 순서) */
 export const PALETTE: readonly string[] = CATEGORICAL
@@ -32,4 +26,3 @@ export function pickColors(n: number): string[] {
   return out
 }
 
-export { FIXED_COLOR, VARIABLE_COLOR, OTHER_COLOR, categoryColors }

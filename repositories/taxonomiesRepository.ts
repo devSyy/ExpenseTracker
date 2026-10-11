@@ -2,6 +2,8 @@
 import { createRepository } from './createRepository'
 import {
   DEFAULT_CATEGORIES,
+  DEFAULT_EXCLUDED_CATEGORIES,
+  DEFAULT_EXCLUDED_TYPES,
   DEFAULT_FIXED_CATEGORIES,
   DEFAULT_INCOME_CATEGORIES,
   DEFAULT_PAYMENT_METHODS,
@@ -9,6 +11,7 @@ import {
   DEFAULT_TX_TYPE,
   PAYMENT_TAGS,
   REFUND_CATEGORY,
+  TRANSFER_CATEGORY,
   type CategoryDef,
   type PaymentDef,
   type PaymentTag,
@@ -23,19 +26,21 @@ const FALLBACK_PAYMENT = '기타결제'
 
 /** 저장된 값이 무엇이든 유효한 TxType으로 정규화. 미지정 → '지출'(기존 동작 유지) */
 export function normalizeTxType(raw: unknown): TxType {
-  return raw === '수입' ? '수입' : DEFAULT_TX_TYPE
+  return raw === '수입' || raw === '이체' || raw === '저축' || raw === '충전' ? raw : DEFAULT_TX_TYPE
 }
 
 function defaultCategoryDefs(): CategoryDef[] {
   const fixed = new Set(DEFAULT_FIXED_CATEGORIES as readonly string[])
   const expense: CategoryDef[] = DEFAULT_CATEGORIES.map((name) => ({
-    name, isFixed: fixed.has(name), hidden: false, type: '지출'
+    name, isFixed: fixed.has(name), hidden: false, type: '지출',
+    excludeFromCalc: DEFAULT_EXCLUDED_CATEGORIES.includes(name)
   }))
   // 신규 설치에만 수입 카테고리를 함께 제공한다.
   // (기존 사용자의 목록에는 migrate에서 임의로 추가하지 않는다 — 데이터 보존 우선)
   const income: CategoryDef[] = DEFAULT_INCOME_CATEGORIES.map((name) => ({
     name, isFixed: false, hidden: false, type: '수입'
   }))
+  // 필수 카테고리(환불·계좌이체)는 ensureRequiredCategories가 지출제외를 켠 채로 보강한다
   return [...expense, ...income]
 }
 
@@ -103,10 +108,13 @@ function normalizePaymentDefs(list: PaymentDef[]): PaymentDef[] {
 /** 시스템이 의존하는 필수 카테고리 자동 보강. */
 function ensureRequiredCategories(list: CategoryDef[]): CategoryDef[] {
   const required: CategoryDef[] = [
-    { name: '입출금', isFixed: false, type: '지출' },
+    { name: '입출금', isFixed: false, type: '지출', excludeFromCalc: true },
     // 환불: 음수 금액(결제 취소) 거래가 자동으로 배정되는 카테고리.
     // 기존 사용자에게도 자동 보강되므로 별도 마이그레이션이 필요 없다.
-    { name: REFUND_CATEGORY, isFixed: false, type: '지출' },
+    // 환불·계좌이체는 신규 보강 시 지출제외가 기본으로 켜진다 (기존 사용자는 아래 v2 이관이 처리)
+    { name: REFUND_CATEGORY, isFixed: false, type: '지출', excludeFromCalc: true },
+    // 계좌이체: 내 통장 간 이동 — 수입/지출 집계에서 빠지는 '이체' 유형
+    { name: TRANSFER_CATEGORY, isFixed: false, type: '이체', excludeFromCalc: true },
     { name: FALLBACK_CATEGORY, isFixed: false, type: '지출' }
   ]
   let next = list
@@ -125,7 +133,7 @@ export const categoriesRepo = createRepository<CategoryDef[]>({
   validator: (x): x is CategoryDef[] =>
     Array.isArray(x) &&
     x.every((y) => y && typeof (y as any).name === 'string' &&
-      ((y as any).type === '수입' || (y as any).type === '지출')),
+      ((y as any).type === '수입' || (y as any).type === '지출' || (y as any).type === '이체' || (y as any).type === '저축' || (y as any).type === '충전')),
   migrate: (raw) => {
     if (!Array.isArray(raw)) return null
     const list: CategoryDef[] = raw
@@ -134,6 +142,7 @@ export const categoriesRepo = createRepository<CategoryDef[]>({
         name: String(x.name).trim(),
         isFixed: Boolean(x.isFixed),
         hidden: Boolean(x.hidden),
+        excludeFromCalc: Boolean(x.excludeFromCalc),
         // 기존 카테고리는 전부 지출로 이관된다 (데이터 손실 없음)
         type: normalizeTxType(x.type)
       }))
@@ -143,6 +152,47 @@ export const categoriesRepo = createRepository<CategoryDef[]>({
 
 // 로드 직후에도 필수 카테고리 보강을 한 번 실행한다 (기존 사용자 마이그레이션).
 categoriesRepo.state.value = ensureRequiredCategories(normalizeCategoryDefs(categoriesRepo.state.value))
+
+// 기존 사용자 1회 이관: 입출금/카드대금/내계좌이체가 이미 있으면 지출제외를 켠다.
+// 마커로 한 번만 실행하므로 이후 사용자가 직접 끈 설정은 유지된다.
+const KEY_EXCL_MIGR = 'expense:migr:default-excluded:v1'
+function applyDefaultExcludedOnce() {
+  if (typeof window === 'undefined') return
+  try {
+    if (window.localStorage.getItem(KEY_EXCL_MIGR)) return
+    let changed = false
+    const next = categoriesRepo.state.value.map((c) => {
+      if (!DEFAULT_EXCLUDED_CATEGORIES.includes(c.name)) return c
+      if (normalizeTxType(c.type) !== '지출' || c.excludeFromCalc) return c
+      changed = true
+      return { ...c, excludeFromCalc: true }
+    })
+    if (changed) categoriesRepo.state.value = next
+    window.localStorage.setItem(KEY_EXCL_MIGR, '1')
+  } catch { /* 저장소 접근 불가 시 무시 */ }
+}
+applyDefaultExcludedOnce()
+
+// v2 이관: 이체 유형 카테고리와 환불 카테고리도 기본 지출제외를 켠다 (v1 이후 추가된 기본값).
+// 마커로 한 번만 실행하므로 이후 사용자가 직접 끈 설정은 유지된다.
+const KEY_EXCL_MIGR_V2 = 'expense:migr:default-excluded:v2'
+function applyDefaultExcludedV2Once() {
+  if (typeof window === 'undefined') return
+  try {
+    if (window.localStorage.getItem(KEY_EXCL_MIGR_V2)) return
+    let changed = false
+    const next = categoriesRepo.state.value.map((c) => {
+      const type = normalizeTxType(c.type)
+      const target = DEFAULT_EXCLUDED_CATEGORIES.includes(c.name) || DEFAULT_EXCLUDED_TYPES.includes(type)
+      if (!target || type === '충전' || c.excludeFromCalc) return c
+      changed = true
+      return { ...c, excludeFromCalc: true }
+    })
+    if (changed) categoriesRepo.state.value = next
+    window.localStorage.setItem(KEY_EXCL_MIGR_V2, '1')
+  } catch { /* 저장소 접근 불가 시 무시 */ }
+}
+applyDefaultExcludedV2Once()
 
 export const paymentsRepo = createRepository<PaymentDef[]>({
   key: KEY_PAY,

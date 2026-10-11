@@ -59,10 +59,13 @@ function setEntry(key: string, amount: number, note: string) {
 }
 
 function setBaseDate(date: string) {
+  // 날짜 입력을 지워서 빈 값이 오면 무시한다 (빈 기준일로 스냅샷을 찍으면 추이에 ym이 빈 점이 생긴다)
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date ?? '')) return
   state.value = { ...state.value, baseDate: date }
 }
 
 function snapshotCurrent() {
+  if (!/^\d{4}-\d{2}/.test(state.value.baseDate ?? '')) return
   const ym = state.value.baseDate.slice(0, 7)
   const t = total.value
   const idx = state.value.trend.findIndex((p) => p.ym === ym)
@@ -103,10 +106,6 @@ function resetToDefaults() {
   state.value = defaultAssetsState()
 }
 
-function todayStr() {
-  return new Date().toISOString().slice(0, 10)
-}
-
 export function useAssets() {
   return {
     state,
@@ -120,7 +119,6 @@ export function useAssets() {
     updateRemark,
     removeRemark,
     resetToDefaults,
-    ASSET_CATEGORIES,
-    todayStr
+    ASSET_CATEGORIES
   }
 }

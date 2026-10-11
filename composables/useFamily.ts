@@ -1,5 +1,6 @@
 // 가족 구성원 컴포저블.
 // primaryMemberId(새 항목 작성 시 자동 태깅) + activeMemberIds(화면 합산 대상) 관리.
+import { createId } from '~/utils/id'
 import { computed } from 'vue'
 import {
   familyRepo,
@@ -59,10 +60,6 @@ function memberName(id: string | null | undefined): string {
 /** activeMemberIds.set: 멤버 ID 집합 (필터/합산 시 사용) */
 const activeMemberSet = computed(() => new Set(activeMemberIds.value))
 
-function uid() {
-  return 'm_' + Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4)
-}
-
 function setFamilyName(name: string) {
   const v = name.trim() || '우리 가족'
   state.value = { ...state.value, familyName: v }
@@ -117,7 +114,7 @@ function isActive(id: string): boolean {
 function addMember(input: Partial<Omit<FamilyMember, 'id'>>): FamilyMember {
   const role = (input.role as string) || '기타'
   const member: FamilyMember = {
-    id: uid(),
+    id: createId('m_'),
     name: (input.name?.trim()) || (role !== '기타' ? role : '새 가족'),
     role,
     color: input.color || roleColor(role),

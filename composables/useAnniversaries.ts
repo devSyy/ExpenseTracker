@@ -1,16 +1,21 @@
 // 기념일 관리 컴포저블 — Repository 위에 CRUD와 날짜 파생 정보를 얹은 레이어.
 // 영속화/검증은 repositories/anniversariesRepository가 담당한다.
 import { computed } from 'vue'
+import type { MutationResult } from '~/utils/types'
 import {
   anniversariesRepo,
   ANNIVERSARY_KINDS,
   type Anniversary,
-  type AnniversaryKind
+  type AnniversaryKind,
+  type AnniversaryCalendar
 } from '~/repositories/anniversariesRepository'
 import {
   daysBetween,
+  lunarToSolar,
   makeId,
+  nextLunarOccurrence,
   nextYearlyOccurrence,
+  toLunar,
   parseYmd,
   todayStart,
   toYmd
@@ -40,12 +45,19 @@ export interface AnniversaryView {
 
 function toView(a: Anniversary, today: Date): AnniversaryView {
   const base = parseYmd(a.date)
-  const next = a.repeatYearly ? nextYearlyOccurrence(a.date, today) : base
+  const next = a.repeatYearly
+    ? (a.calendar === 'lunar' ? nextLunarOccurrence(a.date, today) : nextYearlyOccurrence(a.date, today))
+    : base
 
   // 날짜는 리포지토리에서 검증되므로 여기서 null이 되는 일은 없지만, 방어적으로 처리한다
   const nextDate = next ? toYmd(next) : a.date
   const daysLeft = next ? daysBetween(today, next) : 0
-  const years = base && next ? next.getFullYear() - base.getFullYear() : 0
+  // 음력 기념일은 음력 연도 차이로 센다 (양력으로 새해를 넘겨도 주년이 어긋나지 않게)
+  const nextLunarYear = a.calendar === 'lunar' && next ? toLunar(toYmd(next))?.year : undefined
+  const baseLunarYear = a.calendar === 'lunar' ? toLunar(a.date)?.year : undefined
+  const years = nextLunarYear !== undefined && baseLunarYear !== undefined
+    ? nextLunarYear - baseLunarYear
+    : base && next ? next.getFullYear() - base.getFullYear() : 0
   const remind = a.remindDays ?? DEFAULT_REMIND_DAYS
 
   return {
@@ -116,18 +128,14 @@ const byMonth = computed<Array<{ month: number; items: AnniversaryView[] }>>(() 
 
 export interface AnniversaryInput {
   title: string
+  /** 양력 'YYYY-MM-DD' (음력 기념일은 환산한 양력 날짜) */
   date: string
+  calendar?: AnniversaryCalendar
   kind?: AnniversaryKind
   repeatYearly?: boolean
   remindDays?: number | null
   person?: string
   note?: string
-}
-
-export interface MutationResult {
-  ok: boolean
-  id?: string
-  reason?: string
 }
 
 function validate(input: AnniversaryInput): string | null {
@@ -151,6 +159,7 @@ function addAnniversary(input: AnniversaryInput): MutationResult {
     id: makeId('a'),
     title: input.title.trim(),
     date: input.date.trim(),
+    calendar: input.calendar ?? 'solar',
     kind: input.kind ?? '기념일',
     repeatYearly: input.repeatYearly ?? true,
     remindDays: input.remindDays ?? null,
@@ -199,7 +208,14 @@ function findAnniversary(id: string): Anniversary | undefined {
 /** 기념일 입력 폼이 다루는 값 */
 export interface AnniversaryDraft {
   title: string
+  /** 양력 입력값 (calendar === 'solar'일 때 사용) */
   date: string
+  calendar: AnniversaryCalendar
+  /** 음력 입력값 (calendar === 'lunar'일 때 사용) — 저장 시 양력 date로 환산된다 */
+  lunarYear: number | null
+  lunarMonth: number | null
+  lunarDay: number | null
+  lunarLeap: boolean
   kind: AnniversaryKind
   repeatYearly: boolean
   remindDays: number | null
@@ -211,12 +227,23 @@ export function emptyAnniversaryDraft(): AnniversaryDraft {
   return {
     title: '',
     date: toYmd(todayStart()),
+    calendar: 'solar',
+    lunarYear: null,
+    lunarMonth: null,
+    lunarDay: null,
+    lunarLeap: false,
     kind: '기념일',
     repeatYearly: true,
     remindDays: null,
     person: '',
     note: ''
   }
+}
+
+/** 폼의 음력 입력을 양력 'YYYY-MM-DD'로 환산. 존재하지 않는 음력 날짜면 null */
+export function lunarDraftToSolar(d: Pick<AnniversaryDraft, 'lunarYear' | 'lunarMonth' | 'lunarDay' | 'lunarLeap'>): string | null {
+  if (d.lunarYear === null || d.lunarMonth === null || d.lunarDay === null) return null
+  return lunarToSolar(d.lunarYear, d.lunarMonth, d.lunarDay, d.lunarLeap, true)
 }
 
 export function useAnniversaries() {

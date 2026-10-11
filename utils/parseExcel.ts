@@ -24,6 +24,32 @@ import {
 /** 업로드를 허용하는 확장자 */
 export const SUPPORTED_EXTENSIONS = ['.xlsx', '.xlsm', '.xlsb', '.xls', '.csv', '.tsv', '.txt'] as const
 
+/**
+ * <input accept> 에 확장자와 **함께** 넣을 MIME 타입.
+ *
+ * 왜 필요한가: 데스크톱 브라우저는 accept 의 확장자를 그대로 파일 대화상자 필터로 쓰지만,
+ * 모바일(특히 안드로이드)은 OS 파일 선택기에 **MIME 타입**을 넘긴다. 확장자만 주면
+ * 브라우저가 내부 표에서 MIME 을 유추하는데, 그 표에 없는 확장자(.xlsm/.xlsb/.tsv)가
+ * 섞여 있거나 파일 제공자(구글 드라이브·삼성 내 파일 등)가 보고하는 MIME 이 다르면
+ * 목록에서 회색으로 비활성화돼 아예 고를 수 없다. 그래서 MIME 을 명시한다.
+ *
+ * 선택 이후의 검증은 그대로다 — 확장자(isSupportedFileName)와 매직 바이트(ZIP/CFB)를
+ * 다시 확인하므로, accept 를 넓게 잡아도 엉뚱한 파일이 통과하지는 않는다.
+ */
+export const SUPPORTED_MIME_TYPES = [
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',      // .xlsx
+  'application/vnd.ms-excel.sheet.macroEnabled.12',                        // .xlsm
+  'application/vnd.ms-excel.sheet.binary.macroEnabled.12',                  // .xlsb
+  'application/vnd.ms-excel',                                              // .xls
+  'text/csv',
+  'application/csv',                                                       // 일부 제공자가 이렇게 보고한다
+  'text/tab-separated-values',                                             // .tsv
+  'text/plain'                                                             // .txt / 일부 .csv
+] as const
+
+/** <input type="file" :accept> 에 그대로 넣는 값 — 확장자 + MIME 타입 */
+export const ACCEPT_ATTR = [...SUPPORTED_EXTENSIONS, ...SUPPORTED_MIME_TYPES].join(',')
+
 export function isSupportedFileName(name: string): boolean {
   return SUPPORTED_EXTENSIONS.some((ext) => name.toLowerCase().endsWith(ext))
 }
@@ -142,6 +168,9 @@ function attemptSheet(sheet: XLSX.WorkSheet, sheetName: string, sheetIndex: numb
     const category = classifyCategory(map.category ? row[map.category] : '', description)
     const paymentMethod = normalizePaymentMethod(map.paymentMethod ? row[map.paymentMethod] : '')
     const costType = resolveCostType(map.costType ? row[map.costType] : null, category)
+    // 타입 열이 '지출'인데 금액이 양수 = 환불금 입금 (지출은 음수로 적는 파일 규약)
+    const txTypeRaw = map.txType ? String(row[map.txType] ?? '').trim() : ''
+    const refundDeposit = txTypeRaw === '지출' && !negativeAmount
     const note = map.note ? (row[map.note] ? String(row[map.note]) : undefined) : undefined
 
     transactions.push({
@@ -155,6 +184,8 @@ function attemptSheet(sheet: XLSX.WorkSheet, sheetName: string, sheetIndex: numb
       costType,
       note,
       negativeAmount,
+      ...(refundDeposit ? { refundDeposit: true } : {}),
+      ...(txTypeRaw === '수입' || txTypeRaw === '지출' || txTypeRaw === '이체' ? { fileType: txTypeRaw as '수입' | '지출' | '이체' } : {}),
       ...deriveFields(d)
     })
   })
@@ -208,7 +239,10 @@ export async function parseExpenseFile(
   let encoding = ''
   try {
     if (isBinaryWorkbook(u8)) {
-      wb = XLSX.read(u8, { type: 'array', cellDates: true })
+      // cellDates:false — 날짜 셀을 엑셀 시리얼(숫자)로 받는다. cellDates:true 는 SheetJS가 시간대(KST 등)
+      // 보정을 잘못해 2026-09-01 을 2026-08-31 23:59:08 로 돌려주므로(→ 전달로 집계됨) 쓰지 않는다.
+      // 시리얼 → 날짜 변환은 classify.ts 의 toDate/fromSerial 이 시간대와 무관하게 처리한다.
+      wb = XLSX.read(u8, { type: 'array', cellDates: false })
     } else {
       // CSV / TSV / HTML(.xls로 위장한 표) / SpreadsheetML — 직접 디코딩해서 넘긴다.
       const decoded = decodeText(u8)
@@ -220,7 +254,7 @@ export async function parseExpenseFile(
     try {
       wb = isBinaryWorkbook(u8)
         ? XLSX.read(decodeText(u8).text, { type: 'string', cellDates: true })
-        : XLSX.read(u8, { type: 'array', cellDates: true })
+        : XLSX.read(u8, { type: 'array', cellDates: false })
     } catch {
       throw new Error(`파일 형식을 해석할 수 없습니다. (${(e as Error).message})`)
     }
@@ -271,11 +305,10 @@ export async function parseExpenseFile(
   if (best.skipped.noAmount > 0) {
     warnings.push(`금액이 없거나 0이어서 ${best.skipped.noAmount.toLocaleString('ko-KR')}행을 건너뛰었습니다.`)
   }
-  if (refundResult.refundCount > 0) {
+  if (refundResult.refundCount > 0 && classified.some((t) => t.refundDeposit)) {
+    warnings.push(`타입이 '지출'인 양수 ${refundResult.refundCount.toLocaleString('ko-KR')}건을 '환불'로 분류했습니다. (원래 결제 ${classified.filter((t) => t.refundPair === 'origin').length.toLocaleString('ko-KR')}건과 짝 — 지출 합계에서 함께 제외)`)
+  } else if (refundResult.refundCount > 0) {
     warnings.push(`같은 금액의 결제 건과 짝이 맞는 음수 ${refundResult.refundCount.toLocaleString('ko-KR')}건을 '환불'로 분류했습니다. (지출 합계에서 제외)`)
-  }
-  if (refundResult.unmatchedNegativeCount > 0) {
-    warnings.push(`짝이 맞는 결제 건이 없는 음수 ${refundResult.unmatchedNegativeCount.toLocaleString('ko-KR')}건은 원래 카테고리를 유지합니다. (음수이므로 지출 합계에는 미포함)`)
   }
   if (wb.SheetNames.length > 1) {
     warnings.push(`시트 "${best.sheetName}" 을(를) 사용했습니다. (전체 ${wb.SheetNames.length}개 시트)`)

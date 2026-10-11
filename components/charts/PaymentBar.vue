@@ -9,6 +9,7 @@
 import { computed } from 'vue'
 import { Bar } from 'vue-chartjs'
 import { useExpenses } from '~/composables/useExpenses'
+import { useLocalCurrency } from '~/composables/useLocalCurrency'
 import { bucketByPayment } from '~/utils/aggregate'
 import { formatKRW, formatPercent } from '~/utils/format'
 import {
@@ -22,7 +23,9 @@ import {
 } from '~/utils/chartTheme'
 
 const { filtered } = useExpenses()
-const rows = computed(() => bucketByPayment(filtered.value))
+// 지역화폐로 쓴 거래는 카드가 아니라 해당 지역화폐 이름으로 묶는다 (카드 소비와 구분, 합계는 그대로 — 한 번만 센다)
+const { paymentLabel } = useLocalCurrency()
+const rows = computed(() => bucketByPayment(filtered.value, paymentLabel))
 const total = computed(() => rows.value.reduce((s, r) => s + r.total, 0))
 
 const chartData = computed(() => ({

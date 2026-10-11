@@ -52,7 +52,19 @@ watch(
       </div>
 
       <FiltersBar />
+      <!-- 핵심 결과: 순수지 + 수입은 어디로 갔나 -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <NetBalanceHero />
+        <IncomeAllocationCard />
+      </div>
+
       <KPICards />
+
+      <!-- 수입지출 Sankey 흐름 -->
+      <ChartsIncomeExpenseFlow />
+
+      <!-- 저축 비율 (저축 ÷ 수입) -->
+      <ChartsSavingsRateCard />
 
       <!--
         차트 그리드:
@@ -61,26 +73,26 @@ watch(
         - lg~3xl (일반 데스크톱): 메인 2/3 + 보조 1/3
         - 3xl+ (1792+ FHD/QHD): 메인 3/4 + 보조 1/4 — 보조가 너무 커지지 않도록 비율 조정
        -->
-      <div class="grid grid-cols-1 lg:grid-cols-3 3xl:grid-cols-4 gap-4">
+      <!-- <div class="grid grid-cols-1 lg:grid-cols-3 3xl:grid-cols-4 gap-4">
         <div class="lg:col-span-2 3xl:col-span-3">
           <ChartsPeriodTrendChart />
         </div>
         <ChartsFixedVariableDonut />
-      </div>
+      </div> -->
 
-      <div class="grid grid-cols-1 lg:grid-cols-3 3xl:grid-cols-4 gap-4">
+      <!-- <div class="grid grid-cols-1 lg:grid-cols-3 3xl:grid-cols-4 gap-4">
         <div class="lg:col-span-2 3xl:col-span-3">
           <ChartsCategoryStack />
         </div>
         <ChartsCategoryDonut />
-      </div>
+      </div> -->
 
-      <div class="grid grid-cols-1 lg:grid-cols-3 3xl:grid-cols-4 gap-4">
+      <!-- <div class="grid grid-cols-1 lg:grid-cols-3 3xl:grid-cols-4 gap-4">
         <div class="lg:col-span-2 3xl:col-span-3">
           <ChartsPaymentBar />
         </div>
         <CategoryLeaderboard />
-      </div>
+      </div> -->
 
       <TransactionsTable />
     </template>

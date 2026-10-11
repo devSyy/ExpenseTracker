@@ -1,7 +1,7 @@
 // 거래내역 테이블의 순수 계산 로직.
 //
 // 반응성(ref/computed)에 의존하지 않는 함수만 둔다. 컴포넌트는 여기서 만든
-// 비교기·술어를 computed 안에서 쓰기만 한다. 덕분에 정렬·중복 판정 규칙을
+// 비교기·술어를 computed 안에서 쓰기만 한다. 덕분에 정렬·필터 규칙을
 // 컴포넌트를 띄우지 않고도 검증할 수 있다.
 import type { Transaction } from './types'
 
@@ -45,34 +45,31 @@ export function compareBy(key: SortKey, dir: SortDir): (a: Transaction, b: Trans
 }
 
 // ─────────────────────────────────────────
-// 중복 의심 거래
+// 환불 자동 제외
 // ─────────────────────────────────────────
 
 /**
- * 중복 판정 키 — 같은 날짜 + 같은 금액 + 같은 내용.
- *
- * 엑셀을 두 번 올렸을 때 생기는 완전 중복을 잡는 것이 목적이다. 결제수단·카테고리는
- * 사용자가 나중에 바꿀 수 있으므로 키에 넣지 않는다(넣으면 한쪽만 고친 순간 중복이 풀린다).
- * 날짜는 시각을 버리고 연월일만 쓴다.
+ * '환불' 태그가 붙은 거래 중 **내용이 같은 것**을 지출 계산에서 자동 제외할 대상 id.
+ *  - 환불: 환불 태그(환불 거래·환불 짝 상대편)가 붙은 행끼리 내용이 같으면 서로 상계되는 짝이므로 전부
+ * 적용 여부(autoExcludeApplied 마커)는 호출자가 본다 — 사용자의 해제를 존중하기 위해서다.
  */
-export function duplicateKey(t: Transaction): string {
-  const d = t.date
-  const ymd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-  return `${ymd}|${t.amount}|${t.description.trim()}`
-}
+export function autoExcludeTargets(list: Transaction[], noRefundTag: (t: Transaction) => boolean = () => false): Set<string> {
+  const out = new Set<string>()
 
-/**
- * 키별 건수. 2 이상이면 중복 의심.
- * 판정 범위는 호출자가 정한다 — 필터 결과가 아니라 **전체 거래**를 넘겨야
- * 짝이 필터 밖에 있는 중복도 잡힌다.
- */
-export function duplicateCounts(list: Transaction[]): Map<string, number> {
-  const m = new Map<string, number>()
+  const refundGroups = new Map<string, Transaction[]>()
   for (const t of list) {
-    const k = duplicateKey(t)
-    m.set(k, (m.get(k) ?? 0) + 1)
+    if (noRefundTag(t)) continue   // 저축 카테고리 등 환불 태그가 없어야 하는 행
+    if (!(t.refund === true || t.refundPair === 'origin' || t.refundPair === 'deposit')) continue
+    const k = (t.description ?? '').trim()
+    const g = refundGroups.get(k)
+    if (g) g.push(t)
+    else refundGroups.set(k, [t])
   }
-  return m
+  for (const g of refundGroups.values()) {
+    if (g.length >= 2) g.forEach((t) => out.add(t.id))
+  }
+
+  return out
 }
 
 // ─────────────────────────────────────────
@@ -132,15 +129,14 @@ export function tableMinWidth(visible: ReadonlySet<ColumnKey>, selectWidth = 0):
 // ─────────────────────────────────────────
 
 /** 상태 필터 — 서로 배타적인 단일 선택 */
-export type StatusFilter = 'all' | 'expense' | 'income' | 'excluded' | 'negative' | 'duplicate'
+export type StatusFilter = 'all' | 'expense' | 'income' | 'excluded' | 'negative'
 
 export const STATUS_FILTERS: ReadonlyArray<{ value: StatusFilter; label: string; title: string }> = [
   { value: 'all',       label: '전체',       title: '모든 거래' },
   { value: 'expense',   label: '지출만',     title: '지출 카테고리이면서 제외되지 않은 거래' },
   { value: 'income',    label: '수입만',     title: '수입 카테고리 거래' },
   { value: 'excluded',  label: '제외만',     title: '지출 계산에서 직접 제외한 거래' },
-  { value: 'negative',  label: '음수/환불만', title: '원본 금액이 음수인 거래 (환불 포함)' },
-  { value: 'duplicate', label: '중복 의심만', title: '날짜·금액·내용이 똑같은 거래가 2건 이상인 것' }
+  { value: 'negative',  label: '음수/환불만', title: '원본 금액이 음수인 거래 (환불 포함)' }
 ] as const
 
 /** 문자열 금액 입력("1,0000", "", "abc")을 숫자로. 비었거나 숫자가 아니면 null */

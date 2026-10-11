@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { formatDate, formatGrouped } from '~/utils/format'
 // 카드 관리 페이지: 보유 카드 리스트, 사용금액 차트, 혜택 단계·달성률.
 // 사용금액은 대시보드 거래(useExpenses)에 연결된 paymentMethod 합계로 자동 계산된다.
 import { computed, reactive, ref, watch } from 'vue'
@@ -21,6 +22,12 @@ const {
   achievedTiers,
   achievedValue,
   cardDetails,
+  usageOf,
+  ownerOf,
+  unlinkedPaymentMethods,
+  brokenLinksOf,
+  suggestLinksFor,
+  linkPayment,
   addCard,
   updateCard,
   removeCard,
@@ -168,10 +175,84 @@ function commitEditBenefit() {
   notify('ok', withBackupHint('혜택이 수정되었습니다'))
 }
 
-// ── 포맷터 ──
-function fmtKRW(n: number): string {
-  return Number.isFinite(n) ? Number(Math.round(n)).toLocaleString('ko-KR') : '0'
+// ── 정렬 (사용금액 기준) ──
+type SortKey = 'default' | 'spend-desc' | 'spend-asc' | 'name'
+const SORT_OPTIONS: { value: SortKey; label: string }[] = [
+  { value: 'default', label: '등록순' },
+  { value: 'spend-desc', label: '사용금액 많은순' },
+  { value: 'spend-asc', label: '사용금액 적은순' },
+  { value: 'name', label: '이름순' }
+]
+const sortKey = ref<SortKey>('spend-desc')
+const sortedDetails = computed(() => {
+  const list = cardDetails.value.slice() // 원본 순서(등록순)는 건드리지 않는다
+  switch (sortKey.value) {
+    case 'spend-desc': return list.sort((a, b) => b.spending - a.spending || a.card.name.localeCompare(b.card.name, 'ko'))
+    case 'spend-asc': return list.sort((a, b) => a.spending - b.spending || a.card.name.localeCompare(b.card.name, 'ko'))
+    case 'name': return list.sort((a, b) => a.card.name.localeCompare(b.card.name, 'ko'))
+    default: return list
+  }
+})
+
+// ── 사용내역 (선택한 카드) ──
+const selectedId = ref<string | null>(null)
+const selected = computed(() => {
+  const list = cardDetails.value
+  return list.find((d) => d.card.id === selectedId.value) ?? list[0] ?? null
+})
+const usage = computed(() => (selected.value ? usageOf(selected.value.card) : null))
+const usageSearch = ref('')
+const showExcluded = ref(true)
+const PAGE = 30
+const usageLimit = ref(PAGE)
+type UsageSort = 'date-desc' | 'date-asc' | 'amount-desc' | 'amount-asc'
+const usageSort = ref<UsageSort>('date-desc')
+watch([selectedId, period, usageSearch, showExcluded, usageSort], () => { usageLimit.value = PAGE })
+/** 헤더 클릭: 같은 열이면 방향 토글, 다른 열이면 내림차순부터 */
+function toggleUsageSort(col: 'date' | 'amount') {
+  usageSort.value = usageSort.value === `${col}-desc` ? `${col}-asc` : `${col}-desc`
 }
+function sortMark(col: 'date' | 'amount'): string {
+  if (!usageSort.value.startsWith(col)) return '↕'
+  return usageSort.value.endsWith('desc') ? '↓' : '↑'
+}
+
+const usageRows = computed(() => {
+  const u = usage.value
+  if (!u) return []
+  const q = usageSearch.value.trim().toLowerCase()
+  const list = u.rows.filter((r) => {
+    if (!showExcluded.value && !r.counted) return false
+    if (q && !`${r.tx.description} ${r.tx.category}`.toLowerCase().includes(q)) return false
+    return true
+  })
+  const time = (r: { tx: { date: unknown } }) => new Date(r.tx.date as string).getTime()
+  const amt = (r: { tx: { amount: number } }) => Number(r.tx.amount) || 0
+  // 동점이면 최신 거래가 위로 (원본 rows가 이미 최신순이라 안정 정렬로 유지됨)
+  switch (usageSort.value) {
+    case 'date-asc': return list.sort((a, b) => time(a) - time(b))
+    case 'amount-desc': return list.sort((a, b) => amt(b) - amt(a) || time(b) - time(a))
+    case 'amount-asc': return list.sort((a, b) => amt(a) - amt(b) || time(b) - time(a))
+    default: return list.sort((a, b) => time(b) - time(a))
+  }
+})
+const maxMonth = computed(() => Math.max(1, ...(usage.value?.byMonth ?? []).map((m) => m.amount)))
+
+function fmtDate(v: unknown): string {
+  const d = v instanceof Date ? v : new Date(v as string)
+  if (Number.isNaN(d.getTime())) return '-'
+  return formatDate(d)
+}
+/** 이미 다른 카드가 쓰는 결제수단인지 (이중 집계 방지) */
+function takenByOther(pm: string, cardId: string | null): boolean {
+  const o = ownerOf(pm)
+  return !!o && o.id !== cardId
+}
+function onLinkSuggested(cardId: string, pm: string) {
+  if (linkPayment(cardId, pm)) notify('ok', withBackupHint(`'${pm}' 연결됨 — 사용내역이 동기화되었습니다`))
+}
+// ── 포맷터 ──
+const fmtKRW = (n: number): string => formatGrouped(n, true)
 function fmtMan(n: number): string {
   // 1만원 이상은 만원 단위, 미만은 원 단위
   if (n >= 10_000) return `${Math.round(n / 10_000).toLocaleString('ko-KR')}만원`
@@ -269,6 +350,9 @@ function lightenColor(hex: string, amount = 30): string {
         <h2 class="text-2xl font-bold text-slate-900">카드 관리</h2>
       </div>
       <div class="flex items-center gap-2 text-xs text-slate-500 flex-wrap">
+        <span class="inline-flex items-center gap-1.5 px-2 py-1 rounded-full bg-emerald-50 text-emerald-700 font-medium" title="대시보드 거래가 바뀌면 사용내역이 즉시 반영됩니다">
+          <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>대시보드 연동 · 결제수단 {{ linkedCardCount }}/{{ cardCount }}
+        </span>
         <span>기간:</span>
         <select v-model="period" class="form-input-sm">
           <option value="current">이번 달</option>
@@ -287,11 +371,11 @@ function lightenColor(hex: string, amount = 30): string {
     </div>
 
     <!-- 토스트 -->
-    <transition name="fade">
+    <transition name="toast-drop">
       <div
         v-if="toast"
         :class="[
-          'fixed top-6 right-6 z-50 px-4 py-2 rounded-lg shadow text-sm whitespace-pre-line max-w-sm leading-relaxed',
+          'fixed top-6 inset-x-0 mx-auto w-fit text-center z-50 px-4 py-2 rounded-lg shadow text-sm whitespace-pre-line max-w-sm leading-relaxed',
           toast.kind === 'ok' ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white'
         ]"
       >{{ toast.text }}</div>
@@ -305,7 +389,7 @@ function lightenColor(hex: string, amount = 30): string {
         <div class="text-2xl font-bold text-slate-900 tabular-nums">{{ cardCount }}<span class="text-sm font-medium ml-1">장</span></div>
       </div>
       <div class="card">
-        <div class="text-xs font-semibold text-rose-600 mb-1">이번 달 사용금액</div>
+        <div class="text-xs font-semibold text-rose-600 mb-1">{{ period === 'all' ? '전체' : period === 'current' ? '이번 달' : period }} 사용금액</div>
         <div class="text-2xl font-bold text-rose-600 tabular-nums">{{ fmtKRW(totalSpending) }}<span class="text-sm font-medium ml-1">원</span></div>
       </div>
       <div class="card">
@@ -322,6 +406,17 @@ function lightenColor(hex: string, amount = 30): string {
       </div>
     </div>
 
+    <!-- 미연결 결제수단 안내 -->
+    <div v-if="unlinkedPaymentMethods.length > 0" class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900 flex items-start gap-3 flex-wrap">
+      <div class="flex-1 min-w-[240px]">
+        <b>카드에 연결되지 않은 결제수단 {{ unlinkedPaymentMethods.length }}개</b> — 이 결제수단의 거래는 카드 실적에 잡히지 않습니다.
+        <div class="mt-1.5 flex flex-wrap gap-1.5">
+          <span v-for="pm in unlinkedPaymentMethods" :key="pm" class="px-2 py-0.5 rounded-full bg-white border border-amber-200">{{ pm }}</span>
+        </div>
+      </div>
+      <button type="button" class="btn-secondary text-xs px-3 py-1.5" @click="onAutoGenerate">⚡ 카드로 자동생성</button>
+    </div>
+
     <!-- 보유 카드 리스트 (카드 비주얼 그리드) -->
     <section class="card">
       <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
@@ -335,7 +430,12 @@ function lightenColor(hex: string, amount = 30): string {
             개의 카드가 연결되어 자동 계산됩니다.
           </p>
         </div>
-        <div class="flex gap-2">
+        <div class="flex gap-2 items-center flex-wrap">
+          <label class="text-[11px] text-slate-500 flex items-center gap-1">정렬
+            <select v-model="sortKey" class="form-input-sm">
+              <option v-for="o in SORT_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
+            </select>
+          </label>
           <button
             type="button"
             class="btn-secondary text-xs px-3 py-1.5"
@@ -390,6 +490,8 @@ function lightenColor(hex: string, amount = 30): string {
                 'pm-chip',
                 (newCardDraft.linkedPaymentMethods ?? []).includes(pm) ? 'pm-chip-active' : ''
               ]"
+              :disabled="takenByOther(pm, null)"
+              :title="takenByOther(pm, null) ? `'${ownerOf(pm)?.name}' 카드에 연결됨` : ''"
               @click="toggleNewLink(pm)"
             >{{ pm }}</button>
           </div>
@@ -411,9 +513,11 @@ function lightenColor(hex: string, amount = 30): string {
        -->
       <div v-else class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 3xl:grid-cols-5 gap-4">
         <article
-          v-for="d in cardDetails"
+          v-for="d in sortedDetails"
           :key="d.card.id"
-          class="card-visual relative rounded-2xl shadow-md text-white p-4 overflow-hidden"
+          :class="['card-visual relative rounded-2xl shadow-md text-white p-4 overflow-hidden cursor-pointer transition-all',
+            selected && selected.card.id === d.card.id ? 'ring-4 ring-offset-2 ring-brand-500 -translate-y-0.5 shadow-xl' : 'hover:-translate-y-0.5 hover:shadow-lg']"
+          @click="editingCardId !== d.card.id && (selectedId = d.card.id)"
           :style="{ background: `linear-gradient(135deg, ${d.card.color} 0%, ${lightenColor(d.card.color, 40)} 100%)` }"
         >
           <!-- 편집 모드 -->
@@ -447,6 +551,8 @@ function lightenColor(hex: string, amount = 30): string {
                     'pm-chip pm-chip-sm',
                     (editCardDraft.linkedPaymentMethods ?? []).includes(pm) ? 'pm-chip-active' : ''
                   ]"
+                  :disabled="takenByOther(pm, editingCardId)"
+                  :title="takenByOther(pm, editingCardId) ? `'${ownerOf(pm)?.name}' 카드에 연결됨` : ''"
                   @click="toggleEditLink(pm)"
                 >{{ pm }}</button>
               </div>
@@ -466,7 +572,10 @@ function lightenColor(hex: string, amount = 30): string {
               </div>
               <span class="text-[10px] px-2 py-0.5 rounded-full bg-white/20 backdrop-blur-sm">{{ d.card.type }}</span>
             </div>
-            <div class="text-xs opacity-90 tabular-nums tracking-wider mt-3">{{ d.card.number || '**** **** **** ****' }}</div>
+
+            <div v-if="d.linked" class="mt-2 flex flex-wrap gap-1">
+              <span v-for="pm in d.card.linkedPaymentMethods" :key="pm" class="text-[10px] px-1.5 py-0.5 rounded bg-black/20" :class="brokenLinksOf(d.card).includes(pm) ? 'line-through opacity-70' : ''">{{ pm }}</span>
+            </div>
 
             <div class="mt-3 pt-3 border-t border-white/30">
               <div class="text-[11px] opacity-80 flex items-center justify-between">
@@ -493,12 +602,129 @@ function lightenColor(hex: string, amount = 30): string {
 
             <!-- 우상단 액션 -->
             <div class="absolute top-2 right-2 flex gap-1">
-              <button type="button" class="card-action" title="편집" @click="startEditCard(d.card)">✎</button>
-              <button type="button" class="card-action" title="삭제" @click="onRemoveCard(d.card.id)">×</button>
+              <button type="button" class="card-action" title="편집" @click.stop="startEditCard(d.card)">✎</button>
+              <button type="button" class="card-action" title="삭제" @click.stop="onRemoveCard(d.card.id)">×</button>
             </div>
           </template>
         </article>
       </div>
+    </section>
+
+    <!-- 사용내역 (대시보드 거래 동기화) -->
+    <section v-if="selected && usage" class="card">
+      <div class="flex items-start justify-between gap-3 flex-wrap mb-4">
+        <div class="flex items-center gap-3">
+          <span class="w-10 h-6 rounded-md shadow-sm" :style="{ background: `linear-gradient(135deg, ${selected.card.color}, ${lightenColor(selected.card.color, 40)})` }"></span>
+          <div>
+            <h3 class="font-semibold text-slate-900">{{ selected.card.name }} 사용내역</h3>
+            <p class="text-[11px] text-slate-500 mt-0.5">
+              {{ periodLabel }} ·
+              <template v-if="selected.linked">대시보드 거래 {{ usage.rows.length }}건 동기화 (실적 반영 {{ usage.countedCount }}건)</template>
+              <template v-else>결제수단이 연결되지 않아 수동 입력값을 사용 중입니다</template>
+            </p>
+          </div>
+        </div>
+        <div v-if="selected.linked" class="flex items-center gap-2 text-xs flex-wrap">
+          <input v-model="usageSearch" type="text" placeholder="가맹점·카테고리 검색" class="form-input-sm w-44" />
+          <label class="inline-flex items-center gap-1 text-slate-600 cursor-pointer select-none">
+            <input v-model="showExcluded" type="checkbox" class="rounded border-slate-300" /> 제외 항목 표시
+          </label>
+        </div>
+      </div>
+
+      <!-- 연결 깨짐 / 추천 -->
+      <div v-if="brokenLinksOf(selected.card).length > 0" class="mb-3 rounded-md bg-rose-50 border border-rose-200 px-3 py-2 text-xs text-rose-700">
+        대시보드에서 사라진 결제수단: <b>{{ brokenLinksOf(selected.card).join(', ') }}</b> — 이름이 바뀌었다면 카드 편집에서 다시 연결하세요.
+      </div>
+      <div v-if="suggestLinksFor(selected.card).length > 0" class="mb-3 rounded-md bg-blue-50 border border-blue-200 px-3 py-2 text-xs text-blue-800 flex items-center gap-2 flex-wrap">
+        <span>연결 추천:</span>
+        <button v-for="pm in suggestLinksFor(selected.card)" :key="pm" type="button" class="pm-chip" @click="onLinkSuggested(selected.card.id, pm)">+ {{ pm }}</button>
+      </div>
+
+      <div v-if="!selected.linked" class="py-10 text-center text-sm text-slate-400">
+        카드 우측 상단 ✎ 로 편집해 <b class="text-slate-600">대시보드 결제수단</b>을 연결하면 거래가 자동으로 이 카드의 사용내역이 됩니다.
+      </div>
+
+      <template v-else>
+        <!-- 요약 타일 -->
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+          <div class="rounded-lg bg-slate-50 px-3 py-2.5">
+            <div class="text-[11px] text-slate-500">실적 반영 금액</div>
+            <div class="text-lg font-bold text-rose-600 tabular-nums">{{ fmtKRW(usage.countedTotal) }}원</div>
+          </div>
+          <div class="rounded-lg bg-slate-50 px-3 py-2.5">
+            <div class="text-[11px] text-slate-500">반영 건수</div>
+            <div class="text-lg font-bold text-slate-900 tabular-nums">{{ usage.countedCount }}건</div>
+          </div>
+          <div class="rounded-lg bg-slate-50 px-3 py-2.5">
+            <div class="text-[11px] text-slate-500">제외된 거래</div>
+            <div class="text-lg font-bold text-slate-500 tabular-nums">{{ usage.excludedCount }}건 <span class="text-xs font-medium">({{ fmtKRW(usage.excludedTotal) }}원)</span></div>
+          </div>
+          <div class="rounded-lg bg-slate-50 px-3 py-2.5">
+            <div class="text-[11px] text-slate-500">마지막 사용일</div>
+            <div class="text-lg font-bold text-slate-900 tabular-nums">{{ usage.lastUsedAt ? fmtDate(usage.lastUsedAt) : '-' }}</div>
+          </div>
+        </div>
+
+        <!-- 월별 추이 + 카테고리 -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-5">
+          <div>
+            <div class="text-xs font-semibold text-slate-700 mb-2">최근 6개월 사용금액</div>
+            <div class="flex items-end gap-2 h-28">
+              <div v-for="m in usage.byMonth" :key="m.ym" class="flex-1 flex flex-col items-center justify-end h-full gap-1">
+                <span class="text-[10px] text-slate-500 tabular-nums">{{ m.amount ? fmtMan(m.amount) : '' }}</span>
+                <div class="w-full rounded-t" :style="{ height: Math.max(m.amount ? 4 : 1, (m.amount / maxMonth) * 80) + '%', background: m.amount ? selected.card.color : '#e2e8f0' }"></div>
+                <span class="text-[10px] text-slate-400">{{ m.ym.slice(5) }}월</span>
+              </div>
+            </div>
+          </div>
+          <div>
+            <div class="text-xs font-semibold text-slate-700 mb-2">카테고리별 비중 <span class="text-slate-400 font-normal">· {{ periodLabel }}</span></div>
+            <ul v-if="usage.byCategory.length" class="space-y-1.5">
+              <li v-for="c in usage.byCategory.slice(0, 5)" :key="c.name" class="flex items-center gap-2 text-xs">
+                <span class="w-20 truncate text-slate-600">{{ c.name }}</span>
+                <div class="flex-1 h-2 rounded-full bg-slate-100 overflow-hidden"><div class="h-full" :style="{ width: (c.ratio * 100) + '%', background: selected.card.color }"></div></div>
+                <span class="w-24 text-right tabular-nums text-slate-700">{{ fmtKRW(c.amount) }}원</span>
+                <span class="w-9 text-right tabular-nums text-slate-400">{{ pctText(c.ratio) }}</span>
+              </li>
+            </ul>
+            <p v-else class="text-xs text-slate-400 py-4">이 기간에 반영된 거래가 없습니다.</p>
+          </div>
+        </div>
+
+        <!-- 거래 테이블 -->
+        <div class="overflow-x-auto -mx-1">
+          <table class="w-full text-xs">
+            <thead>
+              <tr class="text-left text-slate-500 border-b border-slate-200">
+                <th class="py-2 px-1 w-24 font-medium"><button type="button" class="sort-th" @click="toggleUsageSort('date')">일자 <span :class="usageSort.startsWith('date') ? 'text-brand-600' : 'text-slate-300'">{{ sortMark('date') }}</span></button></th>
+                <th class="py-2 px-1 font-medium">내용</th>
+                <th class="py-2 px-1 w-28 font-medium">카테고리</th>
+                <th class="py-2 px-1 w-28 font-medium hidden md:table-cell">결제수단</th>
+                <th class="py-2 px-1 w-28 text-right font-medium"><button type="button" class="sort-th" @click="toggleUsageSort('amount')">금액 <span :class="usageSort.startsWith('amount') ? 'text-brand-600' : 'text-slate-300'">{{ sortMark('amount') }}</span></button></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="r in usageRows.slice(0, usageLimit)" :key="r.tx.id" :class="['border-b border-slate-100', r.counted ? '' : 'text-slate-400 bg-slate-50/60']">
+                <td class="py-1.5 px-1 tabular-nums whitespace-nowrap">{{ fmtDate(r.tx.date) }}</td>
+                <td class="py-1.5 px-1 truncate max-w-[260px]">
+                  {{ r.tx.description }}
+                  <span v-if="!r.counted" class="ml-1 px-1.5 py-0.5 rounded-full bg-slate-200 text-slate-600 text-[10px]">{{ r.reason }}</span>
+                </td>
+                <td class="py-1.5 px-1 truncate">{{ r.tx.category }}</td>
+                <td class="py-1.5 px-1 truncate hidden md:table-cell">{{ r.tx.paymentMethod }}</td>
+                <td :class="['py-1.5 px-1 text-right tabular-nums font-medium', r.counted ? 'text-slate-900' : 'line-through']">{{ fmtKRW(r.tx.amount) }}원</td>
+              </tr>
+              <tr v-if="usageRows.length === 0">
+                <td colspan="5" class="py-8 text-center text-slate-400">표시할 거래가 없습니다.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-if="usageRows.length > usageLimit" class="mt-3 text-center">
+          <button type="button" class="btn-mini" @click="usageLimit += PAGE">더 보기 ({{ usageRows.length - usageLimit }}건 남음)</button>
+        </div>
+      </template>
     </section>
 
     <!-- 카드별 사용금액 차트 -->
@@ -518,7 +744,7 @@ function lightenColor(hex: string, amount = 30): string {
       <p class="text-xs text-slate-500 mb-4">각 카드의 금액별 혜택 단계와 현재 사용금액 기준 달성 여부입니다.</p>
 
       <div class="space-y-5">
-        <div v-for="d in cardDetails" :key="d.card.id" class="border-b border-slate-100 pb-5 last:border-b-0 last:pb-0">
+        <div v-for="d in sortedDetails" :key="d.card.id" class="border-b border-slate-100 pb-5 last:border-b-0 last:pb-0">
           <header class="flex items-center justify-between mb-3 flex-wrap gap-2">
             <div class="flex items-center gap-2">
               <span class="inline-block w-3 h-3 rounded-sm" :style="{ background: d.card.color }"></span>
@@ -660,6 +886,16 @@ function lightenColor(hex: string, amount = 30): string {
 .card-visual {
   min-height: 200px;
 }
+.card-chip {
+  width: 30px;
+  height: 22px;
+  border-radius: 5px;
+  background: linear-gradient(135deg, #f5deb3 0%, #d4af37 100%);
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.15);
+}
+.sort-th { font-weight: 500; cursor: pointer; user-select: none; }
+.sort-th:hover { color: rgb(15 23 42); }
+.pm-chip:disabled { opacity: 0.4; cursor: not-allowed; }
 .card-action {
   width: 22px;
   height: 22px;

@@ -25,7 +25,9 @@ export const HEADER_ALIASES: Record<string, string[]> = {
     '카드명', '카드종류', '이용카드', '계좌', '결제계좌', '은행'
   ],
   costType: ['구분', '고정변동', '고정여부', 'type', '비용구분', '비용유형'],
-  note: ['비고', 'note', '참고', '메모2', '특이사항']
+  note: ['비고', 'note', '참고', '메모2', '특이사항'],
+  // 수입/지출/이체 구분 열 (뱅크샐러드 내보내기의 '타입'). 환불 판정에만 쓴다.
+  txType: ['타입', '거래유형', '거래구분', '입출금구분', '수입지출']
 }
 
 /** 논리 컬럼별 헤더 매칭 가중치 — 헤더 행 탐지 점수 계산에 사용 */
@@ -36,7 +38,8 @@ const HEADER_WEIGHT: Record<string, number> = {
   category: 1,
   paymentMethod: 1,
   costType: 0.5,
-  note: 0.5
+  note: 0.5,
+  txType: 0
 }
 
 /**
@@ -213,7 +216,8 @@ const SERIAL_MAX = 73050
 function fromSerial(n: number): Date | null {
   if (n < SERIAL_MIN || n > SERIAL_MAX) return null
   const epoch = Date.UTC(1899, 11, 30)
-  const utc = new Date(epoch + Math.round(n) * 86400000)
+  // 시각 부분(소수)은 버리고 날짜만 쓴다. round 를 쓰면 오후 시각(0.5 이상)이 다음 날로 넘어간다.
+  const utc = new Date(epoch + Math.floor(n) * 86400000)
   return ymd(utc.getUTCFullYear(), utc.getUTCMonth() + 1, utc.getUTCDate())
 }
 
@@ -223,7 +227,15 @@ function fromSerial(n: number): Date | null {
  *      "2026/1/5" / "2026년 1월 5일" / "20260105" / "26-01-05" / 뒤에 시각이 붙은 형태
  */
 export function toDate(raw: unknown): Date | null {
-  if (raw instanceof Date) return isNaN(raw.getTime()) ? null : raw
+  if (raw instanceof Date) {
+    if (isNaN(raw.getTime())) return null
+    // SheetJS(cellDates)가 KST 등에서 자정을 23:59:xx(전날)로 돌려주는 문제 보정:
+    // 자정 직전 2분 안이면 다음 날 자정으로 올린다.
+    if (raw.getHours() === 23 && raw.getMinutes() >= 58) {
+      return new Date(raw.getFullYear(), raw.getMonth(), raw.getDate() + 1)
+    }
+    return raw
+  }
 
   if (typeof raw === 'number' && Number.isFinite(raw)) {
     // 20260105 처럼 YYYYMMDD 를 숫자로 저장한 경우가 시리얼보다 흔하다

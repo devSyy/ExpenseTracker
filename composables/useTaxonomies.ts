@@ -1,6 +1,8 @@
 // 카테고리·결제수단 컴포저블 — Repository 위에 액션 API를 얹은 얇은 레이어.
 // 영속화/검증/마이그레이션은 모두 repositories/taxonomiesRepository에서 처리한다.
 import { computed } from 'vue'
+import { prepaidRepo } from '~/repositories/prepaidRepository'
+import { removePaymentLinks, renamePaymentLinks } from '~/utils/localCurrency'
 import {
   categoriesRepo,
   paymentsRepo,
@@ -9,12 +11,16 @@ import {
 } from '~/repositories/taxonomiesRepository'
 import {
   DEFAULT_CATEGORIES,
+  DEFAULT_EXCLUDED_CATEGORIES,
+  DEFAULT_EXCLUDED_TYPES,
+  REFUND_CATEGORY,
   DEFAULT_FIXED_CATEGORIES,
   DEFAULT_INCOME_CATEGORIES,
   DEFAULT_PAYMENT_METHODS,
   DEFAULT_PAYMENT_TAG,
   DEFAULT_TX_TYPE,
   PAYMENT_TAGS,
+  TRANSFER_CATEGORY,
   type CategoryDef,
   type PaymentDef,
   type PaymentTag,
@@ -33,7 +39,12 @@ const payments = paymentsRepo.state
 /** CategoryDef → TxType (미지정 시 기본값) */
 function defType(c: CategoryDef | undefined): TxType {
   if (!c) return DEFAULT_TX_TYPE
-  return c.type === '수입' ? '수입' : DEFAULT_TX_TYPE
+  return c.type === '수입' || c.type === '이체' || c.type === '저축' || c.type === '충전' ? c.type : DEFAULT_TX_TYPE
+}
+
+/** 외부에서 들어온 값 → 유효한 TxType (그 외는 '지출') */
+function normType(t: unknown): TxType {
+  return t === '수입' || t === '이체' || t === '저축' || t === '충전' ? t : DEFAULT_TX_TYPE
 }
 
 const categoryNames = computed<string[]>(() => categories.value.map((c) => c.name))
@@ -48,6 +59,24 @@ const incomeCategories = computed<CategoryDef[]>(() =>
 )
 const expenseCategories = computed<CategoryDef[]>(() =>
   categories.value.filter((c) => defType(c) === '지출')
+)
+const transferCategories = computed<CategoryDef[]>(() =>
+  categories.value.filter((c) => defType(c) === '이체')
+)
+const savingsCategories = computed<CategoryDef[]>(() =>
+  categories.value.filter((c) => defType(c) === '저축')
+)
+const chargeCategories = computed<CategoryDef[]>(() =>
+  categories.value.filter((c) => defType(c) === '충전')
+)
+const visibleChargeCategoryNames = computed<string[]>(() =>
+  chargeCategories.value.filter((c) => !c.hidden).map((c) => c.name)
+)
+const visibleSavingsCategoryNames = computed<string[]>(() =>
+  savingsCategories.value.filter((c) => !c.hidden).map((c) => c.name)
+)
+const visibleTransferCategoryNames = computed<string[]>(() =>
+  transferCategories.value.filter((c) => !c.hidden).map((c) => c.name)
 )
 const incomeCategoryNames = computed<string[]>(() => incomeCategories.value.map((c) => c.name))
 const expenseCategoryNames = computed<string[]>(() => expenseCategories.value.map((c) => c.name))
@@ -96,10 +125,28 @@ function defTag(p: PaymentDef | undefined): PaymentTag {
   return p.tag === '저축' ? '저축' : DEFAULT_PAYMENT_TAG
 }
 
+/** 고정비·지출제외 체크를 둘 수 있는 유형 — 충전을 뺀 지출·수입·이체·저축 */
+function supportsCategoryFlags(type: TxType): boolean { return type !== '충전' }
+
+/**
+ * 카테고리 단위 '지출 계산 제외'.
+ * 지출은 지출 합계에서, 수입·저축은 각자의 합계(수입 합계·저축 집계)에서 빠진다.
+ * 이체는 원래 어느 집계에도 들어가지 않으므로 플래그만 저장된다.
+ */
+function isExcludedCategory(name: string): boolean {
+  const c = findCategory(name)
+  return Boolean(c?.excludeFromCalc) && supportsCategoryFlags(defType(c))
+}
 function isFixedCategory(name: string): boolean { return Boolean(findCategory(name)?.isFixed) }
 /** 카테고리 이름 → 수입/지출. 모든 수입·지출 계산이 이 함수를 통해 판단한다. */
 function categoryType(name: string): TxType { return defType(findCategory(name)) }
 function isIncomeCategory(name: string): boolean { return categoryType(name) === '수입' }
+/** 계좌이체 유형 — 수입·지출 어느 집계에도 들어가지 않는다 */
+function isTransferCategory(name: string): boolean { return categoryType(name) === '이체' }
+/** 저축 유형 — 이체처럼 수입·지출 어느 집계에도 들어가지 않는다 */
+function isSavingsCategory(name: string): boolean { return categoryType(name) === '저축' }
+/** 충전 유형 — 이체처럼 수입·지출 어느 집계에도 들어가지 않는다 */
+function isChargeCategory(name: string): boolean { return categoryType(name) === '충전' }
 function isCategoryHidden(name: string): boolean { return Boolean(findCategory(name)?.hidden) }
 function isPaymentHidden(name: string): boolean { return Boolean(findPayment(name)?.hidden) }
 /** 결제수단 이름 → 소비/저축 태그 (미등록/미지정은 '소비') */
@@ -115,9 +162,8 @@ function addCategory(
   const v = name.trim()
   if (!v) return { ok: false, reason: '이름을 입력하세요' }
   if (categories.value.some((c) => c.name === v)) return { ok: false, reason: '이미 존재하는 카테고리' }
-  const t: TxType = type === '수입' ? '수입' : '지출'
-  // 수입 카테고리는 고정비/변동비 개념이 없으므로 항상 false
-  categories.value = [...categories.value, { name: v, isFixed: t === '수입' ? false : isFixed, hidden: false, type: t }]
+  const t: TxType = normType(type)
+  categories.value = [...categories.value, { name: v, isFixed: supportsCategoryFlags(t) ? isFixed : false, hidden: false, type: t, excludeFromCalc: DEFAULT_EXCLUDED_TYPES.includes(t) || DEFAULT_EXCLUDED_CATEGORIES.includes(v) }]
   return { ok: true }
 }
 
@@ -125,10 +171,15 @@ function addCategory(
 function setCategoryType(name: string, type: TxType) {
   const idx = categories.value.findIndex((c) => c.name === name)
   if (idx === -1) return
-  const t: TxType = type === '수입' ? '수입' : '지출'
+  const t: TxType = normType(type)
   const next = [...categories.value]
-  // 수입으로 바꾸면 고정비 플래그는 의미가 없으므로 해제
-  next[idx] = { ...next[idx], type: t, isFixed: t === '수입' ? false : next[idx].isFixed }
+  // 충전으로 바꾸면 고정비·지출제외 플래그는 의미가 없으므로 해제 (지출·수입·이체·저축은 유지)
+  next[idx] = {
+    ...next[idx], type: t,
+    isFixed: supportsCategoryFlags(t) ? next[idx].isFixed : false,
+    // 이체로 바꾸면 지출제외를 기본으로 켠다 (이후 사용자가 직접 끌 수 있다)
+    excludeFromCalc: !supportsCategoryFlags(t) ? false : DEFAULT_EXCLUDED_TYPES.includes(t) ? true : next[idx].excludeFromCalc
+  }
   categories.value = next
 }
 function renameCategory(oldName: string, newName: string): { ok: boolean; reason?: string } {
@@ -148,10 +199,17 @@ function renameCategory(oldName: string, newName: string): { ok: boolean; reason
 function setCategoryFixed(name: string, isFixed: boolean) {
   const idx = categories.value.findIndex((c) => c.name === name)
   if (idx === -1) return
-  // 수입 카테고리에는 고정비/변동비가 적용되지 않는다
-  if (defType(categories.value[idx]) === '수입') return
+  if (!supportsCategoryFlags(defType(categories.value[idx]))) return
   const next = [...categories.value]
   next[idx] = { ...next[idx], isFixed }
+  categories.value = next
+}
+function setCategoryExcluded(name: string, excludeFromCalc: boolean) {
+  const idx = categories.value.findIndex((c) => c.name === name)
+  if (idx === -1) return
+  if (!supportsCategoryFlags(defType(categories.value[idx]))) return
+  const next = [...categories.value]
+  next[idx] = { ...next[idx], excludeFromCalc }
   categories.value = next
 }
 function setCategoryHidden(name: string, hidden: boolean) {
@@ -319,6 +377,8 @@ function renamePayment(oldName: string, newName: string): { ok: boolean; reason?
   const next = [...payments.value]
   next[idx] = { ...next[idx], name: v }
   payments.value = next
+  // 선불 자산(지역화폐 등)에 연결된 카드 이름도 함께 바꾼다 — 안 그러면 연결이 조용히 끊긴다
+  prepaidRepo.state.value = renamePaymentLinks(prepaidRepo.state.value, oldName, v)
   return { ok: true }
 }
 function setPaymentHidden(name: string, hidden: boolean) {
@@ -333,6 +393,8 @@ function removePayment(name: string): { ok: boolean; reason?: string } {
   const next = payments.value.filter((p) => p.name !== name)
   if (next.length === payments.value.length) return { ok: false, reason: '대상 결제수단 없음' }
   payments.value = next
+  // 삭제된 카드는 선불 자산 연결에서도 뺀다 (이미 사용 체크된 거래는 그대로 남는다)
+  prepaidRepo.state.value = removePaymentLinks(prepaidRepo.state.value, name)
   return { ok: true }
 }
 function movePayment(name: string, direction: -1 | 1) {
@@ -344,6 +406,18 @@ function movePayment(name: string, direction: -1 | 1) {
   ;[next[idx], next[target]] = [next[target], next[idx]]
   payments.value = next
 }
+// ── 가나다(자음) 순 정렬 ──
+// 저장 순서 자체를 바꾼다. 필터·편집 드롭다운, 차트 범례, 수입/지출 관리 등 모든 메뉴가
+// 이 배열의 순서를 그대로 쓰므로 한 번 정렬하면 전체가 같은 순서로 동기화된다.
+// 'ko-KR' collator: ㄱㄴㄷㄹ… 순, 숫자는 자연 정렬('항목2' < '항목10').
+const koCollator = new Intl.Collator('ko-KR', { numeric: true, sensitivity: 'base' })
+function sortCategoriesAlpha(): void {
+  categories.value = [...categories.value].sort((a, b) => koCollator.compare(a.name, b.name))
+}
+function sortPaymentsAlpha(): void {
+  payments.value = [...payments.value].sort((a, b) => koCollator.compare(a.name, b.name))
+}
+
 function reorderPayments(orderedNames: string[]) {
   const map = new Map(payments.value.map((p) => [p.name, p]))
   const next: PaymentDef[] = []
@@ -358,8 +432,11 @@ function reorderPayments(orderedNames: string[]) {
 function resetToDefaults() {
   const fixed = new Set(DEFAULT_FIXED_CATEGORIES as readonly string[])
   categories.value = [
-    ...DEFAULT_CATEGORIES.map((name) => ({ name, isFixed: fixed.has(name), hidden: false, type: '지출' as TxType })),
-    ...DEFAULT_INCOME_CATEGORIES.map((name) => ({ name, isFixed: false, hidden: false, type: '수입' as TxType }))
+    ...DEFAULT_CATEGORIES.map((name) => ({ name, isFixed: fixed.has(name), hidden: false, type: '지출' as TxType, excludeFromCalc: DEFAULT_EXCLUDED_CATEGORIES.includes(name) })),
+    ...DEFAULT_INCOME_CATEGORIES.map((name) => ({ name, isFixed: false, hidden: false, type: '수입' as TxType })),
+    // 환불·계좌이체는 필수 카테고리 — 초기화 후에도 유지하며 지출제외가 기본으로 켜진다
+    { name: REFUND_CATEGORY, isFixed: false, hidden: false, type: '지출' as TxType, excludeFromCalc: true },
+    { name: TRANSFER_CATEGORY, isFixed: false, hidden: false, type: '이체' as TxType, excludeFromCalc: true }
   ]
   // 초기화된 결제수단은 모두 '소비' 태그이며 카테고리 매핑은 비어 있다
   payments.value = DEFAULT_PAYMENT_METHODS.map((name) => ({
@@ -380,8 +457,19 @@ export function useTaxonomies() {
     expenseCategoryNames,
     visibleIncomeCategoryNames,
     visibleExpenseCategoryNames,
+    transferCategories,
+    visibleTransferCategoryNames,
+    savingsCategories,
+    chargeCategories,
+    visibleChargeCategoryNames,
+    isChargeCategory,
+    visibleSavingsCategoryNames,
     categoryType,
+    isExcludedCategory,
+    setCategoryExcluded,
     isIncomeCategory,
+    isTransferCategory,
+    isSavingsCategory,
     setCategoryType,
     paymentNames,
     visiblePaymentNames,
@@ -413,6 +501,8 @@ export function useTaxonomies() {
     removePayment,
     movePayment,
     reorderPayments,
+    sortCategoriesAlpha,
+    sortPaymentsAlpha,
     resetToDefaults,
     FALLBACK_CATEGORY,
     FALLBACK_PAYMENT

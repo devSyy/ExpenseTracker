@@ -104,6 +104,91 @@ export function formatMonthDay(ymd: string | null | undefined): string {
   return `${d.getMonth() + 1}월 ${d.getDate()}일 (${WEEKDAYS[d.getDay()]})`
 }
 
+// ── 음력 ──
+// 저장/입력은 항상 양력이고, 음력은 표시용으로만 변환한다 (저장하지 않음).
+// 브라우저 내장 Intl 중국력(한국 음력과 동일한 규칙)을 쓰므로 별도 라이브러리가 필요 없다.
+let lunarFmt: Intl.DateTimeFormat | null | undefined
+
+function getLunarFmt(): Intl.DateTimeFormat | null {
+  if (lunarFmt !== undefined) return lunarFmt
+  try {
+    lunarFmt = new Intl.DateTimeFormat('ko-KR-u-ca-chinese', { year: 'numeric', month: 'numeric', day: 'numeric' })
+  } catch {
+    lunarFmt = null
+  }
+  return lunarFmt
+}
+
+/** 'YYYY-MM-DD'(양력) → 음력 { year, month, day, leap }. 변환 불가면 null */
+export function toLunar(ymd: string | null | undefined): { year: number; month: number; day: number; leap: boolean } | null {
+  const d = parseYmd(ymd)
+  const fmt = getLunarFmt()
+  if (!d || !fmt) return null
+  const parts = fmt.formatToParts(d)
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? ''
+  const monthRaw = get('month') // '8' / 윤달은 '윤6'
+  const year = Number(get('relatedYear'))
+  const month = Number(monthRaw.replace(/\D/g, ''))
+  const day = Number(get('day'))
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day) || !month || !day) return null
+  return { year, month, day, leap: monthRaw.includes('윤') }
+}
+
+/** 음력 표기 — '음력 8월 23일' / 윤달은 '음력 윤6월 1일'. withYear면 '음력 2026. 8. 23.' */
+export function formatLunar(ymd: string | null | undefined, withYear = false): string {
+  const l = toLunar(ymd)
+  if (!l) return '–'
+  const m = `${l.leap ? '윤' : ''}${l.month}월`
+  return withYear ? `음력 ${l.year}년 ${m} ${l.day}일` : `음력 ${m} ${l.day}일`
+}
+
+// 음력 연도별 (월, 윤달, 일) → 양력 'YYYY-MM-DD' 표. 연도당 한 번만 훑는다.
+const lunarYearCache = new Map<number, Map<string, string>>()
+
+function lunarYearTable(year: number): Map<string, string> {
+  const hit = lunarYearCache.get(year)
+  if (hit) return hit
+  const table = new Map<string, string>()
+  // 음력 Y년은 양력 Y년 1~2월 초에 시작해 Y+1년 1~2월에 끝난다
+  const end = new Date(year + 1, 2, 1)
+  for (let d = new Date(year, 0, 1); d < end; d = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1)) {
+    const ymd = toYmd(d)
+    const l = toLunar(ymd)
+    if (l && l.year === year) table.set(`${l.month}-${l.leap ? 1 : 0}-${l.day}`, ymd)
+  }
+  lunarYearCache.set(year, table)
+  return table
+}
+
+/**
+ * 음력 → 양력 'YYYY-MM-DD'. 해당 날짜가 없으면 null.
+ * 폴백: 윤달이 그 해에 없으면 평달로, 30일이 없는 달(29일까지)이면 29일로 — 매년 반복 기념일이 사라지지 않게 한다.
+ * strict=true면 폴백 없이 정확히 일치하는 날짜만 인정한다 (사용자 입력 검증용).
+ */
+export function lunarToSolar(year: number, month: number, day: number, leap = false, strict = false): string | null {
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return null
+  if (month < 1 || month > 12 || day < 1 || day > 30) return null
+  if (!getLunarFmt()) return null
+  const t = lunarYearTable(year)
+  const exact = t.get(`${month}-${leap ? 1 : 0}-${day}`)
+  if (exact || strict) return exact ?? null
+  const m = leap && !t.has(`${month}-1-1`) ? 0 : leap ? 1 : 0
+  return t.get(`${month}-${m}-${day}`) ?? t.get(`${month}-${m}-${day - 1}`) ?? null
+}
+
+/** 음력 기준 매년 반복 — 'YYYY-MM-DD'(양력으로 저장된 원래 날짜)의 음력 월·일이 돌아오는 다음 양력 날짜 */
+export function nextLunarOccurrence(ymd: string | null | undefined, from: Date = todayStart()): Date | null {
+  const l = toLunar(ymd)
+  if (!l) return null
+  let best: Date | null = null
+  for (const y of [from.getFullYear() - 1, from.getFullYear(), from.getFullYear() + 1]) {
+    const s = lunarToSolar(y, l.month, l.day, l.leap)
+    const d = parseYmd(s)
+    if (d && d.getTime() >= from.getTime() && (!best || d < best)) best = d
+  }
+  return best
+}
+
 /** 남은 일수를 사람 말로 — '오늘' / '내일' / '12일 남음' / '3일 지남' */
 export function describeDays(days: number | null): string {
   if (days === null) return '–'

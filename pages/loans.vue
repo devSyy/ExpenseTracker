@@ -1,26 +1,36 @@
 <script setup lang="ts">
-// 대출 현황 페이지: 요약 카드 4개 + 내역 테이블 + 잔액 비중 도넛 + 상환 스케줄/금리 차트 + 요약 패널.
+import { formatGrouped } from '~/utils/format'
+// 대출 현황 페이지 (목업 기반 고도화)
+// 헤더 → KPI 4장(액센트 바) → 내역 테이블(전폭) → [잔액 비중 | 상환 스케줄] → [금리 현황 | 대출 요약]
+// 차트는 Chart.js 대신 SVG/CSS로 그린다: 값·범례가 항상 화면에 보이고 의존성이 줄어든다.
 import { computed, reactive, ref } from 'vue'
-import { Bar, Doughnut, Line } from 'vue-chartjs'
-import { useLoans, type Loan } from '~/composables/useLoans'
+import { useLoans, LOAN_TYPES, type Loan } from '~/composables/useLoans'
 import { withBackupHint } from '~/utils/backupHint'
 
 useHead({ title: '대출 현황 · 가계부' })
 
 const {
   state,
+  visibleLoans,
+  activeLoans,
+  loansByBalance,
+  loansByRate,
   totalBalance,
   totalLimit,
   totalMonthlyPayment,
   weightedAvgRate,
   usageRate,
   annualInterest,
-  balanceBreakdown,
-  ratesByType,
-  schedule,
+  rateRange,
+  typeBreakdown,
+  institutionBreakdown,
+  typeColor,
+  scheduleRows,
+  monthsUntilMaturity,
   addLoan,
   updateLoan,
   removeLoan,
+  removeLoans,
   setBaseDate
 } = useLoans()
 
@@ -41,16 +51,24 @@ const editDraft = reactive<Loan>({
   maturityDate: '', monthlyPayment: 0, status: '정상', note: ''
 })
 const adding = ref(false)
-const newDraft = reactive<Omit<Loan, 'id'>>({
-  type: '주택담보대출', institution: '', product: '',
-  balance: 0, limit: 0, rate: 0, repaymentMethod: '원리금균등',
-  maturityDate: new Date().toISOString().slice(0, 10), monthlyPayment: 0, status: '정상', note: ''
-})
+function blankDraft(): Omit<Loan, 'id'> {
+  return {
+    type: '주택담보대출', institution: '', product: '',
+    balance: 0, limit: 0, rate: 0, repaymentMethod: '원리금균등',
+    maturityDate: new Date().toISOString().slice(0, 10), monthlyPayment: 0, status: '정상', note: ''
+  }
+}
+const newDraft = reactive<Omit<Loan, 'id'>>(blankDraft())
+const tableCard = ref<HTMLElement | null>(null)
 
 const REPAYMENT_OPTIONS = ['원리금균등', '원금균등', '만기일시상환', '리볼빙']
 const STATUS_OPTIONS = ['정상', '연체', '휴면', '만기']
-const TYPE_OPTIONS = ['주택담보대출', '사업자대출', '신용대출', '카드론', '기타대출', '자동차대출', '학자금대출']
+const TYPE_OPTIONS = [...LOAN_TYPES]
 
+function openAdd() {
+  adding.value = true
+  tableCard.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
 function startEdit(loan: Loan) {
   editingId.value = loan.id
   Object.assign(editDraft, loan)
@@ -67,22 +85,24 @@ function onRemove(id: string) {
   if (!window.confirm('이 대출을 삭제할까요?')) return
   if (removeLoan(id)) notify('ok', withBackupHint('삭제되었습니다'))
 }
+function onRemoveAll() {
+  const ids = visibleLoans.value.map((l) => l.id)
+  if (ids.length === 0) return
+  if (!window.confirm(`표시 중인 대출 ${ids.length}건을 모두 삭제할까요?\n되돌릴 수 없습니다.`)) return
+  const n = removeLoans(ids)
+  editingId.value = null
+  if (n > 0) notify('ok', withBackupHint(`${n}건이 삭제되었습니다`))
+}
 function onAdd() {
   if (!newDraft.type || !newDraft.institution) { notify('err', '구분과 금융기관을 입력하세요'); return }
   addLoan({ ...newDraft })
-  Object.assign(newDraft, {
-    type: '주택담보대출', institution: '', product: '',
-    balance: 0, limit: 0, rate: 0, repaymentMethod: '원리금균등',
-    maturityDate: new Date().toISOString().slice(0, 10), monthlyPayment: 0, status: '정상', note: ''
-  })
+  Object.assign(newDraft, blankDraft())
   adding.value = false
   notify('ok', withBackupHint('대출이 추가되었습니다'))
 }
 
 // ── 포맷터 ──
-function fmtKRW(n: number): string {
-  return Number.isFinite(n) ? Number(Math.round(n)).toLocaleString('ko-KR') : '0'
-}
+const fmtKRW = (n: number): string => formatGrouped(n, true)
 function fmtBigKRW(n: number): string {
   if (!Number.isFinite(n) || n === 0) return '0원'
   const eok = Math.floor(n / 100_000_000)
@@ -93,445 +113,444 @@ function fmtBigKRW(n: number): string {
   if (parts.length === 0) parts.push(fmtKRW(n))
   return parts.join(' ') + '원'
 }
+/** 도넛 중앙처럼 좁은 곳용 — 1.7억원 / 850만원 */
+function fmtCompactKRW(n: number): string {
+  if (!Number.isFinite(n) || n === 0) return '0원'
+  if (n >= 100_000_000) return `${(n / 100_000_000).toFixed(1).replace(/\.0$/, '')}억원`
+  if (n >= 10_000) return `${Math.round(n / 10_000).toLocaleString('ko-KR')}만원`
+  return `${fmtKRW(n)}원`
+}
 function fmtPct(n: number): string {
   return (n * 100).toFixed(1) + '%'
 }
+/** '주택담보대출' → '주택담보' (칩·아바타용) */
 function shortType(t: string): string {
-  if (t === '주택담보대출') return '주담대'
-  return t
+  return t.endsWith('대출') ? t.slice(0, -2) : t
+}
+function fmtRemaining(months: number): string {
+  if (months <= 0) return '만기 도래'
+  const y = Math.floor(months / 12)
+  const m = months % 12
+  return [y > 0 ? `${y}년` : '', m > 0 ? `${m}개월` : ''].filter(Boolean).join(' ')
+}
+function loanLabel(l: Loan): string {
+  return [l.institution, l.product].filter(Boolean).join(' · ') || l.type
+}
+function statusClass(s: string): string {
+  return s === '정상' ? 'st-ok' : s === '연체' ? 'st-late' : 'st-other'
+}
+/** 만기가 1년 이내로 다가온 대출 — 날짜를 강조한다 */
+function isMaturingSoon(l: Loan): boolean {
+  const m = monthsUntilMaturity(l)
+  return l.status !== '만기' && m > 0 && m <= 12
 }
 
-// ── 차트 데이터 ──
-
-// 잔액 비중 도넛
-const donutData = computed(() => ({
-  labels: balanceBreakdown.value.map((b) => b.type),
-  datasets: [{
-    data: balanceBreakdown.value.map((b) => b.balance),
-    backgroundColor: balanceBreakdown.value.map((b) => b.color),
-    borderColor: '#ffffff',
-    borderWidth: 2
-  }]
-}))
-const donutOptions = {
-  responsive: true,
-  maintainAspectRatio: false,
-  cutout: '55%',
-  plugins: {
-    legend: { display: false },
-    tooltip: {
-      callbacks: {
-        label: (ctx: any) => {
-          const total = ctx.dataset.data.reduce((a: number, b: number) => a + b, 0) || 1
-          return `${ctx.label}: ${fmtKRW(ctx.parsed)}원 (${((ctx.parsed / total) * 100).toFixed(1)}%)`
-        }
-      }
-    }
-  }
-}
-
-// 상환 스케줄 바 (단위: 만원)
-const scheduleData = computed(() => {
-  const s = schedule.value
-  const toMan = (n: number) => Math.round(n / 10000)
-  return {
-    labels: ['1년 이내', '1~3년 이내', '3~5년 이내', '5년 초과'],
-    datasets: [
-      {
-        label: '원금',
-        data: [toMan(s.within1y.principal), toMan(s.y1to3.principal), toMan(s.y3to5.principal), toMan(s.over5y.principal)],
-        backgroundColor: '#3b82f6',
-        borderRadius: 4,
-        maxBarThickness: 28
-      },
-      {
-        label: '이자',
-        data: [toMan(s.within1y.interest), toMan(s.y1to3.interest), toMan(s.y3to5.interest), toMan(s.over5y.interest)],
-        backgroundColor: '#cbd5e1',
-        borderRadius: 4,
-        maxBarThickness: 28
-      }
-    ]
-  }
+// ── 잔액 비중 도넛 ──
+const groupBy = ref<'institution' | 'type'>('institution')
+const breakdown = computed(() => groupBy.value === 'institution' ? institutionBreakdown.value : typeBreakdown.value)
+const hoverLabel = ref<string | null>(null)
+const SEG_GAP = 0.6 // 조각 사이 흰 간격 (둘레 100 기준)
+const donutSegments = computed(() => {
+  let cum = 0
+  const n = breakdown.value.length
+  return breakdown.value.map((b) => {
+    const pct = b.share * 100
+    const len = n > 1 ? Math.max(pct - SEG_GAP, 0.01) : pct
+    const seg = { ...b, len, offset: -cum }
+    cum += pct
+    return seg
+  })
 })
-const scheduleOptions = {
-  responsive: true,
-  maintainAspectRatio: false,
-  plugins: {
-    legend: { position: 'top' as const, align: 'end' as const, labels: { boxWidth: 12, font: { size: 11 } } },
-    tooltip: {
-      callbacks: {
-        label: (ctx: any) => `${ctx.dataset.label}: ${Number(ctx.parsed.y).toLocaleString('ko-KR')}만원`
-      }
-    }
-  },
-  scales: {
-    y: { beginAtZero: true, ticks: { callback: (v: any) => Number(v).toLocaleString('ko-KR') }, grid: { color: 'rgba(148,163,184,0.2)' } },
-    x: { grid: { display: false } }
-  }
+const donutCenter = computed(() => {
+  const hit = hoverLabel.value ? breakdown.value.find((b) => b.label === hoverLabel.value) : null
+  return hit
+    ? { caption: hit.label, value: fmtCompactKRW(hit.balance) }
+    : { caption: '총 잔액', value: fmtCompactKRW(totalBalance.value) }
+})
+
+// ── 상환 스케줄 (스택 바) ──
+const scheduleMax = computed(() => Math.max(0, ...scheduleRows.value.map((r) => r.principal + r.interest)))
+function barPct(v: number): number {
+  if (scheduleMax.value <= 0 || v <= 0) return 0
+  return Math.max((v / scheduleMax.value) * 100, 0.8) // 0보다 크면 최소한 보이게
 }
 
-// 캔버스에 직접 값 라벨 그리는 인라인 플러그인
-const valueLabelsPlugin = {
-  id: 'valueLabels',
-  afterDatasetsDraw(chart: any) {
-    const { ctx } = chart
-    chart.data.datasets.forEach((dataset: any, di: number) => {
-      const meta = chart.getDatasetMeta(di)
-      meta.data.forEach((point: any, i: number) => {
-        const v = dataset.data[i]
-        if (v == null || v === 0) return
-        ctx.save()
-        ctx.fillStyle = '#475569'
-        ctx.font = '10.5px Pretendard, sans-serif'
-        ctx.textAlign = 'center'
-        ctx.fillText(Number(v).toLocaleString('ko-KR'), point.x, point.y - 6)
-        ctx.restore()
-      })
-    })
-  }
-}
-
-// 금리 라인
-const rateData = computed(() => ({
-  labels: ratesByType.value.map((r) => shortType(r.type)),
-  datasets: [{
-    label: '금리 (%)',
-    data: ratesByType.value.map((r) => Number(r.rate.toFixed(2))),
-    borderColor: '#3b82f6',
-    backgroundColor: 'rgba(59,130,246,0.08)',
-    pointBackgroundColor: '#3b82f6',
-    pointRadius: 4,
-    tension: 0.3,
-    fill: true
-  }]
-}))
-const rateOptions = {
-  responsive: true,
-  maintainAspectRatio: false,
-  plugins: {
-    legend: { display: false },
-    tooltip: { callbacks: { label: (ctx: any) => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(2)}%` } }
-  },
-  scales: {
-    y: { beginAtZero: true, suggestedMax: 20, ticks: { stepSize: 4, callback: (v: any) => v }, grid: { color: 'rgba(148,163,184,0.2)' } },
-    x: { grid: { display: false } }
-  }
-}
-const rateLabelsPlugin = {
-  id: 'rateLabels',
-  afterDatasetsDraw(chart: any) {
-    const { ctx } = chart
-    chart.data.datasets.forEach((dataset: any, di: number) => {
-      const meta = chart.getDatasetMeta(di)
-      meta.data.forEach((point: any, i: number) => {
-        const v = dataset.data[i]
-        if (v == null) return
-        ctx.save()
-        ctx.fillStyle = '#475569'
-        ctx.font = '11px Pretendard, sans-serif'
-        ctx.textAlign = 'center'
-        ctx.fillText(`${Number(v).toFixed(2)}%`, point.x, point.y - 8)
-        ctx.restore()
-      })
-    })
-  }
+// ── 금리 현황 ──
+const rateMax = computed(() => Math.max(0, ...loansByRate.value.map((l) => l.rate)))
+function rateBarPct(rate: number): number {
+  return rateMax.value > 0 ? (rate / rateMax.value) * 100 : 0
 }
 </script>
 
 <template>
   <div class="page-shell section-gap">
     <!-- 헤더 -->
-    <div class="flex items-center justify-between flex-wrap gap-3">
-      <div class="flex items-center gap-2">
-        <div class="w-8 h-8 rounded-md bg-blue-50 text-blue-600 grid place-items-center">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18M5 21V10l7-5 7 5v11M9 21v-6h6v6"/></svg>
-        </div>
-        <h2 class="text-2xl font-bold text-slate-900">대출 현황</h2>
+    <div class="flex items-end justify-between flex-wrap gap-3">
+      <div>
+        <div class="text-xs text-slate-500">자산 › 대출</div>
+        <h2 class="text-2xl font-extrabold text-slate-900 tracking-tight">대출 현황</h2>
+        <p class="text-sm text-slate-500 mt-0.5">
+          기준일 {{ state.baseDate }} · 대출 {{ visibleLoans.length }}건
+        </p>
       </div>
-      <div class="flex items-center gap-2 text-xs text-slate-500">
-        <span>기준일:</span>
-        <input
-          type="date"
-          :value="state.baseDate"
-          @change="setBaseDate(($event.target as HTMLInputElement).value)"
-          class="form-input-sm"
-        />
+      <div class="flex items-center gap-2 flex-wrap">
+        <label class="flex items-center gap-2 text-xs text-slate-500">
+          기준일
+          <input
+            type="date"
+            :value="state.baseDate"
+            @change="setBaseDate(($event.target as HTMLInputElement).value)"
+            class="form-input-sm"
+          />
+        </label>
+        <button type="button" class="btn-primary" @click="openAdd">+ 대출 추가</button>
       </div>
     </div>
 
     <!-- 토스트 -->
-    <transition name="fade">
+    <transition name="toast-drop">
       <div
         v-if="toast"
         :class="[
-          'fixed top-6 right-6 z-50 px-4 py-2 rounded-lg shadow text-sm whitespace-pre-line max-w-sm leading-relaxed',
+          'fixed top-6 inset-x-0 mx-auto w-fit text-center z-50 px-4 py-2 rounded-lg shadow text-sm whitespace-pre-line max-w-sm leading-relaxed',
           toast.kind === 'ok' ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white'
         ]"
       >{{ toast.text }}</div>
     </transition>
 
-    <!-- 4개 요약 카드 -->
-    <!-- 대출 KPI 4장: 모든 폰 2, 데스크톱 4 -->
+    <!-- KPI 4장: 모바일 2열, 데스크톱 4열 -->
     <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-      <!-- 총 대출 잔액 -->
       <div class="card relative overflow-hidden">
-        <div class="text-xs font-semibold text-blue-600 mb-1">총 대출 잔액</div>
-        <div class="text-2xl font-bold text-blue-600 tabular-nums">{{ fmtKRW(totalBalance) }} <span class="text-sm font-medium text-slate-700">원</span></div>
-        <div class="text-[11px] text-slate-500 mt-1">({{ fmtBigKRW(totalBalance) }})</div>
-        <svg class="absolute right-3 bottom-3 opacity-20" width="58" height="48" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="1.5"><path d="M3 21h18M5 21V10l7-5 7 5v11"/></svg>
+        <span class="kpi-bar bg-orange-500"></span>
+        <div class="text-xs font-bold text-slate-500">총 대출 잔액</div>
+        <div class="kpi-num text-orange-800">{{ fmtKRW(totalBalance) }}<span class="kpi-unit">원</span></div>
+        <div class="text-xs text-slate-400 mt-0.5">상환 중 <b class="text-slate-600">{{ activeLoans.length }}건</b> · {{ fmtBigKRW(totalBalance) }}</div>
       </div>
 
-      <!-- 총 대출 한도 -->
       <div class="card relative overflow-hidden">
-        <div class="text-xs font-semibold text-emerald-600 mb-1">총 대출 한도</div>
-        <div class="text-2xl font-bold text-slate-900 tabular-nums">{{ fmtKRW(totalLimit) }} <span class="text-sm font-medium">원</span></div>
-        <div class="text-[11px] text-slate-500 mt-1">({{ fmtBigKRW(totalLimit) }})</div>
-        <div class="mt-2 flex items-center gap-2">
-          <span class="text-[11px] text-slate-500 whitespace-nowrap">한도 대비 사용률 {{ fmtPct(usageRate) }}</span>
-          <div class="flex-1 h-1.5 rounded-full bg-slate-100 overflow-hidden">
-            <div class="h-full bg-emerald-500 transition-all" :style="{ width: Math.min(100, usageRate * 100) + '%' }"></div>
-          </div>
+        <span class="kpi-bar bg-brand-600"></span>
+        <div class="text-xs font-bold text-slate-500">총 대출 한도</div>
+        <div class="kpi-num text-brand-800">{{ fmtKRW(totalLimit) }}<span class="kpi-unit">원</span></div>
+        <div class="text-xs text-slate-400 mt-0.5">한도 대비 사용률 <b class="text-slate-600">{{ fmtPct(usageRate) }}</b></div>
+        <div class="h-1.5 rounded-full bg-slate-100 overflow-hidden mt-2.5">
+          <div class="h-full rounded-full bg-brand-600 transition-all" :style="{ width: Math.min(100, usageRate * 100) + '%' }"></div>
         </div>
       </div>
 
-      <!-- 총 월 상환액 -->
       <div class="card relative overflow-hidden">
-        <div class="text-xs font-semibold text-amber-600 mb-1">총 월 상환액</div>
-        <div class="text-2xl font-bold text-amber-600 tabular-nums">{{ fmtKRW(totalMonthlyPayment) }} <span class="text-sm font-medium text-slate-700">원</span></div>
-        <div class="text-[11px] text-slate-500 mt-1">(예상)</div>
-        <div class="mt-2 text-[11px] text-slate-500">
-          연간 이자 비용(예상) <b class="text-slate-700 tabular-nums">{{ fmtKRW(annualInterest) }} 원</b>
-        </div>
+        <span class="kpi-bar bg-orange-500"></span>
+        <div class="text-xs font-bold text-slate-500">총 월 상환액 (예상)</div>
+        <div class="kpi-num text-orange-800">{{ fmtKRW(totalMonthlyPayment) }}<span class="kpi-unit">원</span></div>
+        <div class="text-xs text-slate-400 mt-0.5">연간 이자 비용 예상 <b class="text-slate-600">{{ fmtCompactKRW(annualInterest) }}</b></div>
       </div>
 
-      <!-- 평균 금리 -->
       <div class="card relative overflow-hidden">
-        <div class="text-xs font-semibold text-violet-600 mb-1">평균 금리</div>
-        <div class="text-2xl font-bold text-violet-600 tabular-nums">{{ weightedAvgRate.toFixed(2) }}<span class="text-sm font-medium ml-1">%</span></div>
-        <div class="text-[11px] text-slate-500 mt-1">가중평균 금리 기준</div>
-        <svg class="absolute right-3 bottom-3 opacity-20" width="58" height="48" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" stroke-width="1.5"><path d="M19 5L5 19M9 9a4 4 0 1 0-1 1M19 19a4 4 0 1 0-1 1"/></svg>
+        <span class="kpi-bar bg-teal-600"></span>
+        <div class="text-xs font-bold text-slate-500">평균 금리</div>
+        <div class="kpi-num text-teal-700">{{ weightedAvgRate.toFixed(2) }}<span class="kpi-unit">%</span></div>
+        <div class="text-xs text-slate-400 mt-0.5">잔액 가중평균 기준</div>
       </div>
     </div>
 
-    <!-- 대출 내역 + 잔액 비중 -->
-    <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
-      <!-- 대출 내역 (lg:col-span-2) -->
-      <section class="card lg:col-span-2 overflow-hidden">
-        <div class="flex items-center justify-between mb-3">
-          <h3 class="font-semibold text-slate-900">대출 내역</h3>
-          <button v-if="!adding" type="button" class="btn-mini-primary" @click="adding = true">+ 대출 추가</button>
+    <!-- 대출 내역 (전폭) -->
+    <section ref="tableCard" class="card scroll-mt-4">
+      <div class="flex items-center justify-between flex-wrap gap-2 mb-3">
+        <h3 class="font-bold text-slate-900">
+          대출 내역 <span class="text-slate-400 font-medium text-xs">· {{ visibleLoans.length }}건</span>
+        </h3>
+        <div class="flex items-center gap-2">
+          <button
+            type="button"
+            class="btn-outline text-amber-800"
+            :disabled="visibleLoans.length === 0"
+            @click="onRemoveAll"
+          >전체 삭제</button>
+          <button v-if="!adding" type="button" class="btn-primary" @click="openAdd">+ 대출 추가</button>
         </div>
+      </div>
 
-        <div class="overflow-x-auto rounded-lg border border-slate-200">
-          <table class="min-w-full text-xs">
-            <thead>
-              <tr class="bg-slate-50 text-[11px] text-slate-500 uppercase">
-                <th class="py-2 px-2 text-left">구분</th>
-                <th class="py-2 px-2 text-left">금융기관</th>
-                <th class="py-2 px-2 text-left">대출 상품</th>
-                <th class="py-2 px-2 text-right">대출 잔액</th>
-                <th class="py-2 px-2 text-right">대출 한도</th>
-                <th class="py-2 px-2 text-right">금리</th>
-                <th class="py-2 px-2 text-left">상환방식</th>
-                <th class="py-2 px-2 text-left">만기일</th>
-                <th class="py-2 px-2 text-right">월 상환액</th>
-                <th class="py-2 px-2 text-center">상태</th>
-                <th class="py-2 px-2 text-left">비고</th>
-                <th class="py-2 px-2 w-20"></th>
+      <div class="overflow-x-auto">
+        <table class="min-w-full text-[13px] tabular-nums">
+          <thead>
+            <tr class="text-xs text-slate-500">
+              <th class="th text-left">구분</th>
+              <th class="th text-left">금융기관</th>
+              <th class="th text-left">대출 상품</th>
+              <th class="th text-right">대출 잔액</th>
+              <th class="th text-right">대출 한도</th>
+              <th class="th text-right">금리</th>
+              <th class="th text-left">상환방식</th>
+              <th class="th text-right">만기일</th>
+              <th class="th text-right">월 상환액<br />(예상)</th>
+              <th class="th text-left">상태</th>
+              <th class="th text-left">비고</th>
+              <th class="th w-20"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <!-- 추가 폼 -->
+            <tr v-if="adding" class="bg-brand-50/60">
+              <td class="py-1.5 px-1">
+                <select v-model="newDraft.type" class="form-input-xs w-full">
+                  <option v-for="t in TYPE_OPTIONS" :key="t" :value="t">{{ t }}</option>
+                </select>
+              </td>
+              <td class="py-1.5 px-1"><input v-model="newDraft.institution" type="text" class="form-input-xs w-full" placeholder="A은행" /></td>
+              <td class="py-1.5 px-1"><input v-model="newDraft.product" type="text" class="form-input-xs w-full" placeholder="상품명" /></td>
+              <td class="py-1.5 px-1"><input v-model.number="newDraft.balance" type="number" class="form-input-xs w-28 text-right" /></td>
+              <td class="py-1.5 px-1"><input v-model.number="newDraft.limit" type="number" class="form-input-xs w-28 text-right" /></td>
+              <td class="py-1.5 px-1"><input v-model.number="newDraft.rate" type="number" step="0.01" class="form-input-xs w-16 text-right" /></td>
+              <td class="py-1.5 px-1">
+                <select v-model="newDraft.repaymentMethod" class="form-input-xs w-full">
+                  <option v-for="r in REPAYMENT_OPTIONS" :key="r" :value="r">{{ r }}</option>
+                </select>
+              </td>
+              <td class="py-1.5 px-1"><input v-model="newDraft.maturityDate" type="date" class="form-input-xs" /></td>
+              <td class="py-1.5 px-1"><input v-model.number="newDraft.monthlyPayment" type="number" class="form-input-xs w-24 text-right" /></td>
+              <td class="py-1.5 px-1">
+                <select v-model="newDraft.status" class="form-input-xs">
+                  <option v-for="s in STATUS_OPTIONS" :key="s" :value="s">{{ s }}</option>
+                </select>
+              </td>
+              <td class="py-1.5 px-1"><input v-model="newDraft.note" type="text" class="form-input-xs w-full" /></td>
+              <td class="py-1.5 px-1 text-center whitespace-nowrap">
+                <button type="button" class="btn-mini-primary" @click="onAdd">추가</button>
+                <button type="button" class="btn-mini ml-1" @click="adding = false">취소</button>
+              </td>
+            </tr>
+
+            <!-- 빈 상태 -->
+            <tr v-if="visibleLoans.length === 0 && !adding">
+              <td colspan="12" class="py-12 text-center">
+                <div class="text-slate-500 text-sm">등록된 대출이 없습니다.</div>
+                <button type="button" class="btn-primary mt-3" @click="openAdd">+ 대출 추가</button>
+              </td>
+            </tr>
+
+            <!-- 데이터 행 -->
+            <template v-for="loan in visibleLoans" :key="loan.id">
+              <tr v-if="editingId !== loan.id" class="border-t border-slate-100 hover:bg-slate-50/60 transition-colors">
+                <td class="py-3 px-2"><span class="chip-type">{{ shortType(loan.type) }}</span></td>
+                <td class="py-3 px-2 text-slate-700 min-w-[5rem]">{{ loan.institution }}</td>
+                <td class="py-3 px-2 font-bold text-slate-900 min-w-[7rem]">{{ loan.product }}</td>
+                <td class="py-3 px-2 text-right">{{ fmtKRW(loan.balance) }}</td>
+                <td class="py-3 px-2 text-right text-slate-600">{{ fmtKRW(loan.limit) }}</td>
+                <td class="py-3 px-2 text-right text-slate-700">{{ loan.rate.toFixed(2) }}%</td>
+                <td class="py-3 px-2 text-slate-600 whitespace-nowrap">{{ loan.repaymentMethod }}</td>
+                <td
+                  class="py-3 px-2 text-right whitespace-nowrap"
+                  :class="isMaturingSoon(loan) ? 'text-amber-700 font-semibold' : 'text-slate-600'"
+                  :title="isMaturingSoon(loan) ? '1년 이내 만기' : undefined"
+                >{{ loan.maturityDate }}</td>
+                <td class="py-3 px-2 text-right font-bold text-slate-900">{{ loan.monthlyPayment > 0 ? fmtKRW(loan.monthlyPayment) : '-' }}</td>
+                <td class="py-3 px-2"><span :class="['status-badge', statusClass(loan.status)]">{{ loan.status }}</span></td>
+                <td class="py-3 px-2 text-slate-500 max-w-[8rem] truncate" :title="loan.note">{{ loan.note || '-' }}</td>
+                <td class="py-1 px-1 text-center whitespace-nowrap">
+                  <button type="button" class="icon-btn" aria-label="수정" title="수정" @click="startEdit(loan)">
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9l-4-4L4 16v4zM13.5 6.5l4 4"/></svg>
+                  </button>
+                  <button type="button" class="icon-btn hover:text-rose-600" aria-label="삭제" title="삭제" @click="onRemove(loan.id)">
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>
+                  </button>
+                </td>
               </tr>
-            </thead>
-            <tbody>
-              <!-- 추가 폼 -->
-              <tr v-if="adding" class="border-t border-slate-100 bg-blue-50/40">
-                <td class="py-1 px-1">
-                  <select v-model="newDraft.type" class="form-input-xs w-full">
+              <tr v-else class="border-t border-slate-100 bg-amber-50/50">
+                <td class="py-1.5 px-1">
+                  <select v-model="editDraft.type" class="form-input-xs w-full">
                     <option v-for="t in TYPE_OPTIONS" :key="t" :value="t">{{ t }}</option>
                   </select>
                 </td>
-                <td class="py-1 px-1"><input v-model="newDraft.institution" type="text" class="form-input-xs w-full" placeholder="A은행" /></td>
-                <td class="py-1 px-1"><input v-model="newDraft.product" type="text" class="form-input-xs w-full" placeholder="상품명" /></td>
-                <td class="py-1 px-1"><input v-model.number="newDraft.balance" type="number" class="form-input-xs w-28 text-right tabular-nums" /></td>
-                <td class="py-1 px-1"><input v-model.number="newDraft.limit" type="number" class="form-input-xs w-28 text-right tabular-nums" /></td>
-                <td class="py-1 px-1"><input v-model.number="newDraft.rate" type="number" step="0.01" class="form-input-xs w-16 text-right tabular-nums" /></td>
-                <td class="py-1 px-1">
-                  <select v-model="newDraft.repaymentMethod" class="form-input-xs w-full">
+                <td class="py-1.5 px-1"><input v-model="editDraft.institution" type="text" class="form-input-xs w-full" /></td>
+                <td class="py-1.5 px-1"><input v-model="editDraft.product" type="text" class="form-input-xs w-full" /></td>
+                <td class="py-1.5 px-1"><input v-model.number="editDraft.balance" type="number" class="form-input-xs w-28 text-right" /></td>
+                <td class="py-1.5 px-1"><input v-model.number="editDraft.limit" type="number" class="form-input-xs w-28 text-right" /></td>
+                <td class="py-1.5 px-1"><input v-model.number="editDraft.rate" type="number" step="0.01" class="form-input-xs w-16 text-right" /></td>
+                <td class="py-1.5 px-1">
+                  <select v-model="editDraft.repaymentMethod" class="form-input-xs w-full">
                     <option v-for="r in REPAYMENT_OPTIONS" :key="r" :value="r">{{ r }}</option>
                   </select>
                 </td>
-                <td class="py-1 px-1"><input v-model="newDraft.maturityDate" type="date" class="form-input-xs" /></td>
-                <td class="py-1 px-1"><input v-model.number="newDraft.monthlyPayment" type="number" class="form-input-xs w-24 text-right tabular-nums" /></td>
-                <td class="py-1 px-1">
-                  <select v-model="newDraft.status" class="form-input-xs">
+                <td class="py-1.5 px-1"><input v-model="editDraft.maturityDate" type="date" class="form-input-xs" /></td>
+                <td class="py-1.5 px-1"><input v-model.number="editDraft.monthlyPayment" type="number" class="form-input-xs w-24 text-right" /></td>
+                <td class="py-1.5 px-1">
+                  <select v-model="editDraft.status" class="form-input-xs">
                     <option v-for="s in STATUS_OPTIONS" :key="s" :value="s">{{ s }}</option>
                   </select>
                 </td>
-                <td class="py-1 px-1"><input v-model="newDraft.note" type="text" class="form-input-xs w-full" /></td>
-                <td class="py-1 px-1 text-center whitespace-nowrap">
-                  <button type="button" class="btn-mini-primary" @click="onAdd">추가</button>
-                  <button type="button" class="btn-mini ml-1" @click="adding = false">취소</button>
+                <td class="py-1.5 px-1"><input v-model="editDraft.note" type="text" class="form-input-xs w-full" /></td>
+                <td class="py-1.5 px-1 text-center whitespace-nowrap">
+                  <button type="button" class="btn-mini-primary" @click="commitEdit">저장</button>
+                  <button type="button" class="btn-mini ml-1" @click="cancelEdit">취소</button>
                 </td>
               </tr>
-              <!-- 데이터 행 -->
-              <template v-for="loan in state.loans" :key="loan.id">
-                <tr v-if="editingId !== loan.id" class="border-t border-slate-100 hover:bg-slate-50/40">
-                  <td class="py-2 px-2 text-slate-700">{{ loan.type }}</td>
-                  <td class="py-2 px-2 text-slate-700">{{ loan.institution }}</td>
-                  <td class="py-2 px-2 text-slate-700">{{ loan.product }}</td>
-                  <td class="py-2 px-2 text-right tabular-nums">{{ fmtKRW(loan.balance) }}</td>
-                  <td class="py-2 px-2 text-right tabular-nums text-slate-600">{{ fmtKRW(loan.limit) }}</td>
-                  <td class="py-2 px-2 text-right tabular-nums text-slate-700">{{ loan.rate.toFixed(2) }}%</td>
-                  <td class="py-2 px-2 text-slate-600">{{ loan.repaymentMethod }}</td>
-                  <td class="py-2 px-2 tabular-nums text-slate-600">{{ loan.maturityDate }}</td>
-                  <td class="py-2 px-2 text-right tabular-nums text-slate-700">{{ loan.monthlyPayment > 0 ? fmtKRW(loan.monthlyPayment) : '-' }}</td>
-                  <td class="py-2 px-2 text-center">
-                    <span :class="['status-badge', loan.status === '정상' ? 'st-ok' : loan.status === '연체' ? 'st-late' : 'st-other']">{{ loan.status }}</span>
-                  </td>
-                  <td class="py-2 px-2 text-slate-500">{{ loan.note || '-' }}</td>
-                  <td class="py-2 px-2 text-center whitespace-nowrap">
-                    <button type="button" class="btn-mini" @click="startEdit(loan)">수정</button>
-                    <button type="button" class="btn-mini-danger ml-1" @click="onRemove(loan.id)">삭제</button>
-                  </td>
-                </tr>
-                <tr v-else class="border-t border-slate-100 bg-amber-50/40">
-                  <td class="py-1 px-1">
-                    <select v-model="editDraft.type" class="form-input-xs w-full">
-                      <option v-for="t in TYPE_OPTIONS" :key="t" :value="t">{{ t }}</option>
-                    </select>
-                  </td>
-                  <td class="py-1 px-1"><input v-model="editDraft.institution" type="text" class="form-input-xs w-full" /></td>
-                  <td class="py-1 px-1"><input v-model="editDraft.product" type="text" class="form-input-xs w-full" /></td>
-                  <td class="py-1 px-1"><input v-model.number="editDraft.balance" type="number" class="form-input-xs w-28 text-right tabular-nums" /></td>
-                  <td class="py-1 px-1"><input v-model.number="editDraft.limit" type="number" class="form-input-xs w-28 text-right tabular-nums" /></td>
-                  <td class="py-1 px-1"><input v-model.number="editDraft.rate" type="number" step="0.01" class="form-input-xs w-16 text-right tabular-nums" /></td>
-                  <td class="py-1 px-1">
-                    <select v-model="editDraft.repaymentMethod" class="form-input-xs w-full">
-                      <option v-for="r in REPAYMENT_OPTIONS" :key="r" :value="r">{{ r }}</option>
-                    </select>
-                  </td>
-                  <td class="py-1 px-1"><input v-model="editDraft.maturityDate" type="date" class="form-input-xs" /></td>
-                  <td class="py-1 px-1"><input v-model.number="editDraft.monthlyPayment" type="number" class="form-input-xs w-24 text-right tabular-nums" /></td>
-                  <td class="py-1 px-1">
-                    <select v-model="editDraft.status" class="form-input-xs">
-                      <option v-for="s in STATUS_OPTIONS" :key="s" :value="s">{{ s }}</option>
-                    </select>
-                  </td>
-                  <td class="py-1 px-1"><input v-model="editDraft.note" type="text" class="form-input-xs w-full" /></td>
-                  <td class="py-1 px-1 text-center whitespace-nowrap">
-                    <button type="button" class="btn-mini-primary" @click="commitEdit">저장</button>
-                    <button type="button" class="btn-mini ml-1" @click="cancelEdit">취소</button>
-                  </td>
-                </tr>
-              </template>
-              <!-- 합계 -->
-              <tr class="border-t-2 border-slate-200 bg-blue-50/40 font-semibold">
-                <td class="py-2 px-2 text-blue-700">합계</td>
-                <td class="py-2 px-2 text-slate-400">-</td>
-                <td class="py-2 px-2 text-slate-400">-</td>
-                <td class="py-2 px-2 text-right tabular-nums text-blue-700">{{ fmtKRW(totalBalance) }}</td>
-                <td class="py-2 px-2 text-right tabular-nums text-blue-700">{{ fmtKRW(totalLimit) }}</td>
-                <td class="py-2 px-2 text-right tabular-nums text-blue-700">{{ weightedAvgRate.toFixed(2) }}%</td>
-                <td class="py-2 px-2 text-slate-400">-</td>
-                <td class="py-2 px-2 text-slate-400">-</td>
-                <td class="py-2 px-2 text-right tabular-nums text-blue-700">{{ fmtKRW(totalMonthlyPayment) }}</td>
-                <td class="py-2 px-2 text-slate-400 text-center">-</td>
-                <td class="py-2 px-2 text-slate-400">-</td>
-                <td></td>
-              </tr>
-            </tbody>
-          </table>
+            </template>
+          </tbody>
+          <!-- 합계 -->
+          <tfoot v-if="visibleLoans.length > 0">
+            <tr class="bg-slate-50 font-extrabold text-slate-900">
+              <td class="py-3 px-2 rounded-l-lg" colspan="3">
+                합계 <span class="font-medium text-slate-400 text-xs">({{ visibleLoans.length }}건)</span>
+              </td>
+              <td class="py-3 px-2 text-right">{{ fmtKRW(totalBalance) }}</td>
+              <td class="py-3 px-2 text-right">{{ fmtKRW(totalLimit) }}</td>
+              <td class="py-3 px-2 text-right">{{ weightedAvgRate.toFixed(2) }}%</td>
+              <td></td>
+              <td></td>
+              <td class="py-3 px-2 text-right">{{ fmtKRW(totalMonthlyPayment) }}</td>
+              <td colspan="3" class="rounded-r-lg"></td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    </section>
+
+    <!-- 잔액 비중 | 상환 스케줄 -->
+    <div class="grid grid-cols-1 lg:grid-cols-[1fr_1.25fr] gap-4 sm:gap-5">
+      <section class="card">
+        <div class="flex items-center justify-between flex-wrap gap-2 mb-3">
+          <h3 class="font-bold text-slate-900">대출 잔액 비중</h3>
+          <div class="seg" role="group" aria-label="비중 기준">
+            <button type="button" :class="{ on: groupBy === 'institution' }" :aria-pressed="groupBy === 'institution'" @click="groupBy = 'institution'">기관별</button>
+            <button type="button" :class="{ on: groupBy === 'type' }" :aria-pressed="groupBy === 'type'" @click="groupBy = 'type'">구분별</button>
+          </div>
         </div>
+
+        <div v-if="breakdown.length > 0" class="flex items-center gap-5 flex-wrap sm:flex-nowrap">
+          <div class="relative w-40 h-40 sm:w-44 sm:h-44 flex-none mx-auto sm:mx-0">
+            <svg viewBox="0 0 42 42" class="w-full h-full -rotate-90" role="img" :aria-label="`대출 잔액 ${groupBy === 'institution' ? '기관별' : '구분별'} 비중`">
+              <circle cx="21" cy="21" r="15.9155" fill="none" stroke="#eef2f7" stroke-width="5.5" />
+              <circle
+                v-for="s in donutSegments"
+                :key="s.label"
+                cx="21" cy="21" r="15.9155" fill="none"
+                :stroke="s.color" stroke-width="5.5"
+                :stroke-dasharray="`${s.len} ${100 - s.len}`"
+                :stroke-dashoffset="s.offset"
+                class="transition-opacity cursor-pointer"
+                :style="{ opacity: hoverLabel && hoverLabel !== s.label ? 0.25 : 1 }"
+                @mouseenter="hoverLabel = s.label"
+                @mouseleave="hoverLabel = null"
+              >
+                <title>{{ s.label }}: {{ fmtKRW(s.balance) }}원 ({{ fmtPct(s.share) }})</title>
+              </circle>
+            </svg>
+            <div class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none px-6 text-center">
+              <span class="text-xs text-slate-500 truncate max-w-full">{{ donutCenter.caption }}</span>
+              <span class="text-lg font-extrabold text-slate-900 tabular-nums">{{ donutCenter.value }}</span>
+            </div>
+          </div>
+
+          <ul class="flex-1 min-w-[10rem] space-y-2 text-sm">
+            <li
+              v-for="b in breakdown"
+              :key="b.label"
+              class="flex items-center gap-2 rounded-md px-1.5 py-1 -mx-1.5 transition-colors"
+              :class="hoverLabel === b.label ? 'bg-slate-50' : ''"
+              @mouseenter="hoverLabel = b.label"
+              @mouseleave="hoverLabel = null"
+            >
+              <span class="inline-block w-2.5 h-2.5 rounded-[3px] flex-none" :style="{ background: b.color }"></span>
+              <span class="flex-1 text-slate-800 truncate" :title="b.label">{{ b.label }}</span>
+              <span class="text-xs text-slate-400 tabular-nums hidden xl:inline">{{ fmtCompactKRW(b.balance) }}</span>
+              <b class="text-slate-600 tabular-nums w-14 text-right">{{ fmtPct(b.share) }}</b>
+            </li>
+          </ul>
+        </div>
+        <div v-else class="h-40 grid place-items-center text-sm text-slate-400">데이터가 없습니다.</div>
       </section>
 
-      <!-- 대출 잔액 비중 -->
       <section class="card">
-        <h3 class="font-semibold text-slate-900 mb-3">대출 잔액 비중</h3>
-        <div class="h-48 mb-3">
-          <Doughnut v-if="balanceBreakdown.length > 0" :data="donutData" :options="donutOptions" />
-          <div v-else class="h-full grid place-items-center text-sm text-slate-400">데이터가 없습니다.</div>
-        </div>
-        <div class="space-y-1.5">
-          <div
-            v-for="b in balanceBreakdown"
-            :key="b.type"
-            class="text-xs"
-          >
-            <div class="flex items-center gap-1.5">
-              <span class="inline-block w-2.5 h-2.5 rounded-sm" :style="{ background: b.color }"></span>
-              <span class="text-slate-700 flex-1">{{ b.type }}</span>
-              <span class="tabular-nums text-slate-700 font-semibold">{{ fmtPct(b.share) }}</span>
-            </div>
-            <div class="text-[11px] text-slate-500 tabular-nums ml-4">{{ fmtKRW(b.balance) }} 원</div>
+        <h3 class="font-bold text-slate-900">상환 스케줄 요약</h3>
+        <p class="text-xs text-slate-500 mt-0.5 mb-4">
+          기준일 이후 기간별 상환 예정 원금 · 이자 (월 상환액이 없거나 리볼빙인 대출은 제외)
+        </p>
+        <div v-for="r in scheduleRows" :key="r.key" class="mb-4 last:mb-3">
+          <div class="flex items-baseline justify-between text-sm mb-1.5">
+            <span class="text-slate-700">{{ r.label }}</span>
+            <b class="tabular-nums text-slate-900">{{ fmtKRW(r.principal) }}원</b>
           </div>
+          <div class="flex h-3.5 rounded-full bg-slate-100 overflow-hidden" role="img" :aria-label="`${r.label} 원금 ${fmtKRW(r.principal)}원, 이자 ${fmtKRW(r.interest)}원`">
+            <i class="block h-full bg-[#eb6834]" :style="{ width: barPct(r.principal) + '%' }"></i>
+            <i class="block h-full bg-[#f8cdb9]" :style="{ width: barPct(r.interest) + '%' }"></i>
+          </div>
+          <div class="text-xs text-slate-400 mt-1">{{ r.count }}건 상환 · 예상 이자 {{ fmtKRW(r.interest) }}원</div>
+        </div>
+        <div class="flex gap-4 text-xs text-slate-500">
+          <span class="flex items-center gap-1.5"><i class="inline-block w-2.5 h-2.5 rounded-[3px] bg-[#eb6834]"></i>원금</span>
+          <span class="flex items-center gap-1.5"><i class="inline-block w-2.5 h-2.5 rounded-[3px] bg-[#f8cdb9]"></i>예상 이자</span>
         </div>
       </section>
     </div>
 
-    <!-- 상환 스케줄 + 금리 + 대출 요약 -->
-    <div class="grid grid-cols-1 lg:grid-cols-3 gap-5">
-      <!-- 상환 스케줄 -->
+    <!-- 금리 현황 | 대출 요약 -->
+    <div class="grid grid-cols-1 lg:grid-cols-[1fr_1.25fr] gap-4 sm:gap-5">
       <section class="card">
-        <div class="flex items-center justify-between">
-          <h3 class="font-semibold text-slate-900">상환 스케줄 요약</h3>
-          <span class="text-[11px] text-slate-400">단위: 만원</span>
+        <h3 class="font-bold text-slate-900">금리 현황</h3>
+        <p class="text-xs text-slate-500 mt-0.5">잔액 가중평균 기준</p>
+        <div class="flex items-baseline gap-2.5 mt-3">
+          <span class="text-[2rem] leading-none font-extrabold text-teal-700 tracking-tight tabular-nums">{{ weightedAvgRate.toFixed(2) }}%</span>
+          <span class="text-xs text-slate-500">가중평균 금리</span>
         </div>
-        <div class="h-56 mt-2">
-          <Bar :data="scheduleData" :options="scheduleOptions" :plugins="[valueLabelsPlugin]" />
+        <div class="grid grid-cols-3 gap-2.5 my-4">
+          <div class="rounded-xl bg-slate-50 px-3 py-2.5">
+            <small class="block text-xs text-slate-500">최저 금리</small>
+            <b class="tabular-nums">{{ rateRange.min.toFixed(2) }}%</b>
+          </div>
+          <div class="rounded-xl bg-slate-50 px-3 py-2.5">
+            <small class="block text-xs text-slate-500">최고 금리</small>
+            <b class="tabular-nums">{{ rateRange.max.toFixed(2) }}%</b>
+          </div>
+          <div class="rounded-xl bg-slate-50 px-3 py-2.5 min-w-0">
+            <small class="block text-xs text-slate-500">연 이자 예상</small>
+            <b class="tabular-nums block truncate" :title="fmtKRW(annualInterest) + '원'">{{ fmtCompactKRW(annualInterest) }}</b>
+          </div>
         </div>
+        <div v-if="loansByRate.length > 0" class="space-y-1.5">
+          <div
+            v-for="l in loansByRate"
+            :key="l.id"
+            class="grid grid-cols-[minmax(0,1fr)_2fr_3.5rem] gap-2.5 items-center text-[13px] py-0.5"
+          >
+            <span class="truncate text-slate-700" :title="loanLabel(l)">{{ l.institution || l.type }} {{ l.product }}</span>
+            <div class="h-2 bg-slate-100 rounded-full overflow-hidden">
+              <i class="block h-full rounded-full bg-teal-700" :style="{ width: rateBarPct(l.rate) + '%' }"></i>
+            </div>
+            <b class="text-right tabular-nums">{{ l.rate.toFixed(2) }}%</b>
+          </div>
+        </div>
+        <div v-else class="py-6 text-center text-sm text-slate-400">데이터가 없습니다.</div>
       </section>
 
-      <!-- 금리 현황 -->
       <section class="card">
-        <div class="flex items-center justify-between">
-          <h3 class="font-semibold text-slate-900">금리 현황</h3>
-          <span class="text-[11px] text-slate-400">단위: %</span>
-        </div>
-        <div class="h-56 mt-2">
-          <Line v-if="ratesByType.length > 0" :data="rateData" :options="rateOptions" :plugins="[rateLabelsPlugin]" />
-          <div v-else class="h-full grid place-items-center text-sm text-slate-400">데이터가 없습니다.</div>
-        </div>
-      </section>
-
-      <!-- 대출 요약 -->
-      <section class="card">
-        <h3 class="font-semibold text-slate-900 mb-3">대출 요약</h3>
-        <ul class="space-y-3 text-sm">
-          <li class="flex items-center gap-3">
-            <span class="w-7 h-7 rounded-md bg-blue-50 text-blue-600 grid place-items-center flex-shrink-0">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5A3.5 3.5 0 0 0 6 8.5c0 1.9 1.6 3.5 3.5 3.5H14a3.5 3.5 0 0 1 0 7H6"/></svg>
-            </span>
-            <span class="text-slate-500 flex-1">총 대출 잔액</span>
-            <span class="tabular-nums text-slate-900 font-semibold">{{ fmtKRW(totalBalance) }} 원 <span class="text-[11px] font-normal text-slate-400">({{ fmtBigKRW(totalBalance) }})</span></span>
-          </li>
-          <li class="flex items-center gap-3">
-            <span class="w-7 h-7 rounded-md bg-emerald-50 text-emerald-600 grid place-items-center flex-shrink-0">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="6" rx="9" ry="3"/><path d="M3 6v6c0 1.7 4 3 9 3s9-1.3 9-3V6M3 12v6c0 1.7 4 3 9 3s9-1.3 9-3v-6"/></svg>
-            </span>
-            <span class="text-slate-500 flex-1">총 대출 한도</span>
-            <span class="tabular-nums text-slate-900 font-semibold">{{ fmtKRW(totalLimit) }} 원 <span class="text-[11px] font-normal text-slate-400">({{ fmtBigKRW(totalLimit) }})</span></span>
-          </li>
-          <li class="flex items-center gap-3">
-            <span class="w-7 h-7 rounded-md bg-amber-50 text-amber-600 grid place-items-center flex-shrink-0">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-            </span>
-            <span class="text-slate-500 flex-1">총 월 상환액(예상)</span>
-            <span class="tabular-nums text-slate-900 font-semibold">{{ fmtKRW(totalMonthlyPayment) }} 원</span>
-          </li>
-          <li class="flex items-center gap-3">
-            <span class="w-7 h-7 rounded-md bg-violet-50 text-violet-600 grid place-items-center flex-shrink-0">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M16 8 8 16M9 9h.01M15 15h.01"/></svg>
-            </span>
-            <span class="text-slate-500 flex-1">평균 금리</span>
-            <span class="tabular-nums text-slate-900 font-semibold">{{ weightedAvgRate.toFixed(2) }}%</span>
-          </li>
-          <li class="flex items-center gap-3">
-            <span class="w-7 h-7 rounded-md bg-emerald-50 text-emerald-600 grid place-items-center flex-shrink-0">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
-            </span>
-            <span class="text-slate-500 flex-1">한도 대비 사용률</span>
-            <span class="tabular-nums text-blue-600 font-semibold">{{ fmtPct(usageRate) }}</span>
+        <h3 class="font-bold text-slate-900">대출 요약</h3>
+        <p class="text-xs text-slate-500 mt-0.5 mb-3">상환 중인 대출을 잔액이 큰 순서로 보여줍니다.</p>
+        <ul v-if="loansByBalance.length > 0">
+          <li
+            v-for="(l, i) in loansByBalance"
+            :key="l.id"
+            class="flex items-center gap-3.5 py-3"
+            :class="i > 0 ? 'border-t border-slate-100' : 'pt-0'"
+          >
+            <span
+              class="w-10 h-10 rounded-xl grid place-items-center font-extrabold text-white flex-none"
+              :style="{ background: typeColor(l.type) }"
+              :title="l.type"
+            >{{ shortType(l.type).charAt(0) }}</span>
+            <div class="flex-1 min-w-0">
+              <b class="block truncate text-slate-900" :title="loanLabel(l)">{{ loanLabel(l) }}</b>
+              <small class="text-slate-400 text-xs">
+                {{ l.repaymentMethod }} · 금리 {{ l.rate.toFixed(2) }}% · 만기 {{ fmtRemaining(monthsUntilMaturity(l)) }}
+              </small>
+            </div>
+            <div class="text-right whitespace-nowrap">
+              <b class="text-orange-800 tabular-nums">{{ fmtKRW(l.balance) }}원</b>
+              <small class="block text-xs text-slate-500 tabular-nums">
+                {{ l.monthlyPayment > 0 ? `월 ${fmtKRW(l.monthlyPayment)}원 (예상)` : '월 상환액 미입력' }}
+              </small>
+            </div>
           </li>
         </ul>
+        <div v-else class="py-8 text-center text-sm text-slate-400">상환 중인 대출이 없습니다.</div>
       </section>
     </div>
 
@@ -550,26 +569,60 @@ const rateLabelsPlugin = {
 .form-input-xs {
   @apply rounded border-slate-300 text-[11px] py-1 px-1.5 focus:border-brand-500 focus:ring-brand-500;
 }
+
+/* 버튼 */
+.btn-primary {
+  @apply inline-flex items-center gap-1.5 min-h-[40px] px-4 rounded-lg bg-brand-600 text-white text-sm font-bold whitespace-nowrap hover:bg-brand-700 transition-colors;
+}
+.btn-outline {
+  @apply inline-flex items-center gap-1.5 min-h-[40px] px-4 rounded-lg border border-slate-300 bg-white text-sm font-bold whitespace-nowrap hover:bg-slate-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed;
+}
 .btn-mini {
   @apply px-2 py-0.5 rounded border border-slate-300 bg-white text-slate-600 text-xs hover:bg-slate-50;
 }
 .btn-mini-primary {
   @apply px-2 py-0.5 rounded bg-brand-600 text-white text-xs hover:bg-brand-700;
 }
-.btn-mini-danger {
-  @apply px-2 py-0.5 rounded border border-rose-200 bg-white text-rose-600 text-xs hover:bg-rose-50;
+.icon-btn {
+  @apply inline-grid place-items-center w-8 h-9 rounded-md text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition-colors;
+}
+
+/* KPI */
+.kpi-bar {
+  @apply absolute left-0 inset-y-0 w-1;
+}
+.kpi-num {
+  @apply font-extrabold tracking-tight tabular-nums whitespace-nowrap mt-1;
+  font-size: clamp(1.1rem, 0.85rem + 0.8vw, 1.5rem);
+  line-height: 1.2;
+}
+.kpi-unit {
+  @apply ml-0.5 font-bold;
+  font-size: 0.7em;
+}
+
+/* 테이블 */
+.th {
+  @apply py-2.5 px-2 font-bold leading-tight border-b border-slate-200 whitespace-nowrap;
+}
+.chip-type {
+  @apply inline-block px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-600 text-xs font-bold whitespace-nowrap;
 }
 .status-badge {
-  display: inline-block;
-  padding: 1px 8px;
-  border-radius: 12px;
-  font-size: 10.5px;
-  font-weight: 500;
-  border: 1px solid;
+  @apply inline-block px-2.5 py-0.5 rounded-full text-xs font-bold whitespace-nowrap;
 }
-.st-ok { background: rgb(220 252 231); color: rgb(21 128 61); border-color: rgb(187 247 208); }
-.st-late { background: rgb(254 226 226); color: rgb(185 28 28); border-color: rgb(254 202 202); }
-.st-other { background: rgb(241 245 249); color: rgb(71 85 105); border-color: rgb(226 232 240); }
-.fade-enter-active, .fade-leave-active { transition: opacity 0.2s ease; }
-.fade-enter-from, .fade-leave-to { opacity: 0; }
+.st-ok { background: rgb(232 240 253); color: rgb(18 58 138); }
+.st-late { background: rgb(254 226 226); color: rgb(185 28 28); }
+.st-other { background: rgb(241 245 249); color: rgb(71 85 105); }
+
+/* 세그먼트 토글 */
+.seg {
+  @apply inline-flex bg-slate-100 rounded-xl p-1 gap-1;
+}
+.seg button {
+  @apply min-h-[36px] px-3.5 rounded-lg text-sm font-bold text-slate-500 transition-colors;
+}
+.seg button.on {
+  @apply bg-white text-slate-900 shadow-sm;
+}
 </style>

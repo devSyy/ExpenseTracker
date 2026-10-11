@@ -1,0 +1,11 @@
+import XLSX from 'xlsx'
+const wb = XLSX.read(await (await import('node:fs')).readFileSync('scripts/_upload.xlsx'),{type:'buffer',cellDates:true})
+const rows = XLSX.utils.sheet_to_json(wb.Sheets['가계부 내역'],{raw:true,defval:null})
+const f=d=>d instanceof Date?`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`:String(d)
+console.log('9/1 rows:'); rows.filter(r=>f(r['날짜'])==='2026-09-01').forEach(r=>console.log(r['타입'],r['대분류'],r['내용'],r['금액'],r['결제수단']))
+const m=new Map(); rows.forEach(r=>{const k=`${f(r['날짜'])}|${r['내용']}|${r['금액']}`; (m.get(k)??m.set(k,[]).get(k)).push(r)})
+const dups=[...m.values()].filter(a=>a.length>1)
+const byType={}; dups.forEach(a=>{const k=a.map(r=>r['타입']).sort().join('+');byType[k]=(byType[k]??0)+a.length-1})
+console.log('dup groups',dups.length,byType)
+dups.filter(a=>a[0]['금액']>0).slice(0,8).forEach(a=>console.log(f(a[0]['날짜']),a.map(r=>`${r['타입']}/${r['대분류']}/${r['결제수단']}`).join(' ; '),a[0]['내용'],a[0]['금액']))
+console.log('neg amounts',rows.filter(r=>r['금액']<0).length)
