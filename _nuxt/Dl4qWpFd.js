@@ -1,0 +1,1 @@
+import{ay as e}from"./DCYx-dnP.js";import{B as t,D as r,E as o,G as s,H as l,I as c}from"./BUFnOaLM.js";const n=e({key:r,default:t,migrate:a=>a&&typeof a=="object"&&!Array.isArray(a)?o(a):null}),u=e({key:l,default:s,migrate:a=>a&&typeof a=="object"&&!Array.isArray(a)?c(a):null});export{n as a,u as c};
