@@ -1,0 +1,1 @@
+import{aF as e}from"./BvKCU09S.js";import{B as t,D as r,E as o,G as s,H as l,I as c}from"./BUFnOaLM.js";const u=e({key:r,default:t,migrate:a=>a&&typeof a=="object"&&!Array.isArray(a)?o(a):null}),y=e({key:l,default:s,migrate:a=>a&&typeof a=="object"&&!Array.isArray(a)?c(a):null});export{u as a,y as c};
