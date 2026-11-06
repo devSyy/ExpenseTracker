@@ -1,0 +1,1 @@
+function d(t,c,n="application/octet-stream"){const a=new Blob([t],{type:n}),o=URL.createObjectURL(a),e=document.createElement("a");e.href=o,e.download=c,document.body.appendChild(e),e.click(),e.remove(),URL.revokeObjectURL(o)}const l="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";export{l as X,d};
